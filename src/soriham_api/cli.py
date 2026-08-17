@@ -14,11 +14,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("scan", help="녹음 폴더를 스캔해 신규 파일을 등록")
     sub.add_parser("watch", help="녹음 폴더를 감시해 새 파일을 자동 등록")
+    sub.add_parser("worker", help="큐를 소비해 변환·엔리치먼트를 실행")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     settings = load_settings()
-    if not settings.audio_dirs:
+    if args.command in ("scan", "watch") and not settings.audio_dirs:
         parser.error("AUDIO_DIRS가 설정돼 있지 않습니다 (.env 확인)")
     session_factory = make_session_factory(settings)
 
@@ -38,6 +39,19 @@ def main(argv: list[str] | None = None) -> int:
         from soriham_api.watch import watch
 
         watch(session_factory, settings.audio_dirs)
+        return 0
+
+    if args.command == "worker":
+        from soriham_api.stt_client import RunnerClient
+        from soriham_api.worker import run_worker
+
+        runner = RunnerClient(base_url=settings.runner_url, upload=settings.runner_upload)
+        run_worker(
+            session_factory,
+            runner,
+            model=settings.stt_model,
+            language=settings.stt_language,
+        )
         return 0
 
     return 1
