@@ -11,7 +11,11 @@ dependencies = [
     "psycopg[binary]>=3.3",
     "sqlalchemy>=2.0",
     "uvicorn>=0.52",
+    "watchdog>=6.0",
 ]
+
+[project.scripts]
+soriham-api = "soriham_api.cli:main"
 
 [dependency-groups]
 dev = [
