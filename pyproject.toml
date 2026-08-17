@@ -40,5 +40,9 @@ extend-exclude = ["alembic/versions"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 의존성 주입 관용구는 기본값 함수 호출이 정상
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
