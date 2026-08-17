@@ -15,6 +15,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("scan", help="녹음 폴더를 스캔해 신규 파일을 등록")
     sub.add_parser("watch", help="녹음 폴더를 감시해 새 파일을 자동 등록")
     sub.add_parser("worker", help="큐를 소비해 변환·엔리치먼트를 실행")
+    serve = sub.add_parser("serve", help="REST API 서버 실행")
+    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--port", type=int, default=8200)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -52,6 +55,14 @@ def main(argv: list[str] | None = None) -> int:
             model=settings.stt_model,
             language=settings.stt_language,
         )
+        return 0
+
+    if args.command == "serve":
+        import uvicorn
+
+        from soriham_api.app import create_app
+
+        uvicorn.run(create_app(settings, session_factory), host=args.host, port=args.port)
         return 0
 
     return 1
