@@ -127,28 +127,30 @@ def transcribe_stage(
         result = runner.transcribe(
             Path(recording.path), model=model, language=language, diarize=True
         )
+        # 결과 파싱·저장 실패도 같은 에러 경로로 — transcribing 상태로 방치되지 않게
+        session.execute(delete(Segment).where(Segment.recording_id == recording.id))
+        for i, seg in enumerate(result["segments"]):
+            session.add(
+                Segment(
+                    recording_id=recording.id,
+                    idx=i,
+                    start_sec=seg["start"],
+                    end_sec=seg["end"],
+                    speaker_key=seg.get("speaker"),
+                    text=seg["text"],
+                    words=seg.get("words") or None,
+                )
+            )
+        recording.language = result.get("language")
+        recording.stt_meta = result.get("meta") or {}
     except Exception as exc:
+        session.rollback()
         recording.status = "error"
         recording.error = f"stt: {exc}"
         _log_stage(session, recording, "transcribe", started, status="error", error=str(exc))
         session.commit()
         raise
 
-    session.execute(delete(Segment).where(Segment.recording_id == recording.id))
-    for i, seg in enumerate(result["segments"]):
-        session.add(
-            Segment(
-                recording_id=recording.id,
-                idx=i,
-                start_sec=seg["start"],
-                end_sec=seg["end"],
-                speaker_key=seg.get("speaker"),
-                text=seg["text"],
-                words=seg.get("words") or None,
-            )
-        )
-    recording.language = result.get("language")
-    recording.stt_meta = result.get("meta") or {}
     recording.error = None
     recording.status = "enriching"
     _log_stage(
@@ -232,3 +234,6 @@ def run_worker(
         except KeyboardInterrupt:
             logger.info("워커 종료")
             return
+        except Exception:  # noqa: BLE001 - DB 단절 등 일시 장애에 워커가 죽지 않게
+            logger.exception("워커 루프 오류 — %.0f초 후 재시도", idle_sleep_sec * 2)
+            time.sleep(idle_sleep_sec * 2)

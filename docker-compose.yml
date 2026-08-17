@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: soriham
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD를 .env에 설정하세요}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       # 18+ 이미지는 메이저 버전별 하위 폴더를 쓰므로 상위 경로에 마운트
       - pgdata:/var/lib/postgresql

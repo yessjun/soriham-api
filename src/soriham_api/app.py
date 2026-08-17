@@ -34,6 +34,12 @@ from soriham_api.models import JobLog, Recording, SpeakerName, Tag
 CHUNK_SIZE = 1024 * 256
 
 
+def _like_pattern(q: str) -> str:
+    """ILIKE 와일드카드(%, _)와 이스케이프 문자를 리터럴로 취급한다."""
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def create_app(
     settings: Settings | None = None,
     session_factory: sessionmaker[Session] | None = None,
@@ -42,9 +48,13 @@ def create_app(
     factory = session_factory or make_session_factory(cfg)
 
     app = FastAPI(title="soriham-api", version=soriham_api.__version__)
-    # LAN 내 콘솔(dev 서버 포함)에서 호출 — 인증 없는 사설망 전제
+    # 브라우저 경유 접근을 설정된 콘솔 오리진으로 한정 (사설망이라도 * 개방은
+    # 임의 웹페이지의 녹취록 열람을 허용하게 됨)
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+        CORSMiddleware,
+        allow_origins=list(cfg.cors_origins),
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     def db() -> Iterator[Session]:
@@ -199,8 +209,25 @@ def create_app(
     ) -> SearchResult:
         from soriham_api.models import Segment
 
-        pattern = f"%{q}%"
+        pattern = _like_pattern(q)
+        # 파일명·제목·요약 매칭을 먼저 배치 — 세그먼트 히트가 limit을 채워
+        # 정확한 제목 일치가 밀려나지 않게 한다
         hits: list[SearchHit] = []
+        meta_rows = session.scalars(
+            select(Recording)
+            .options(selectinload(Recording.tags))
+            .where(
+                or_(
+                    Recording.filename.ilike(pattern),
+                    Recording.title.ilike(pattern),
+                    Recording.summary.ilike(pattern),
+                )
+            )
+            .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
+            .limit(limit)
+        ).all()
+        for rec in meta_rows:
+            hits.append(SearchHit(recording=_summary(rec), segment=None))
         # 세그먼트 본문 매칭 (녹음 최신순, 세그먼트 순서대로)
         seg_rows = session.execute(
             select(Segment, Recording)
@@ -222,22 +249,6 @@ def create_app(
                     ),
                 )
             )
-        # 파일명·제목·요약 매칭
-        meta_rows = session.scalars(
-            select(Recording)
-            .options(selectinload(Recording.tags))
-            .where(
-                or_(
-                    Recording.filename.ilike(pattern),
-                    Recording.title.ilike(pattern),
-                    Recording.summary.ilike(pattern),
-                )
-            )
-            .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
-            .limit(limit)
-        ).all()
-        for rec in meta_rows:
-            hits.append(SearchHit(recording=_summary(rec), segment=None))
         return SearchResult(hits=hits[:limit])
 
     @app.get("/api/stats", response_model=Stats)
@@ -267,9 +278,10 @@ def create_app(
         ).all()
         speed_ratio = None
         eta_sec = None
-        audio_sum = sum(a for a, _ in recent if a)
+        valid = [(a, e) for a, e in recent if a]
+        audio_sum = sum(a for a, _ in valid)
         if audio_sum > 0:
-            speed_ratio = sum(e for _, e in recent) / audio_sum
+            speed_ratio = sum(e for _, e in valid) / audio_sum
             pending_audio = sum(
                 x.audio_sec for x in by_status if x.status in ("pending", "transcribing")
             )
@@ -307,7 +319,7 @@ def _apply_filters(
             .where(Tag.public_id == tag)
         )
     if q:
-        pattern = f"%{q}%"
+        pattern = _like_pattern(q)
         stmt = stmt.where(
             or_(
                 Recording.filename.ilike(pattern),

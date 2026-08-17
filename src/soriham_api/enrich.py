@@ -118,6 +118,7 @@ class LlmEnricher:
         transcript = build_transcript(session, recording)
         if not transcript.strip():
             logger.info("녹취록이 비어 있어 엔리치먼트 생략: %s", recording.filename)
+            recording.summary = ""  # 재큐잉 대상에서 제외(요약 불가 확정)
             return
         result = summarize(self._generator, transcript)
 

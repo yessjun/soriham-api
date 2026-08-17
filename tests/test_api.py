@@ -24,6 +24,7 @@ def client(engine, db, tmp_path: Path):
         runner_upload=False,
         stt_model=None,
         stt_language=None,
+        cors_origins=("http://localhost:5174",),
         enrich_backend="off",
         ollama_url="http://localhost:11434",
         ollama_model="qwen3:8b",
