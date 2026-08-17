@@ -5,10 +5,17 @@ description = "소리함 백엔드: 녹음 인제스트, 변환 파이프라인 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "alembic>=1.19",
+    "fastapi>=0.141",
+    "psycopg[binary]>=3.3",
+    "sqlalchemy>=2.0",
+    "uvicorn>=0.52",
+]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28",
     "pytest>=9.1",
     "ruff>=0.16",
 ]
@@ -23,6 +30,8 @@ module-name = "soriham_api"
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+# alembic 자동 생성 리비전은 생성기 서식을 유지한다
+extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
