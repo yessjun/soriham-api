@@ -64,12 +64,22 @@ class RunnerClient:
 
     def wait(self, job_id: str) -> dict[str, Any]:
         """잡이 끝날 때까지 폴링한다. 러너가 잡을 잊었으면 RunnerJobLost."""
+        errors = 0
         with self._client() as client:
             while True:
-                resp = client.get(f"/jobs/{job_id}")
-                if resp.status_code == 404:
-                    raise RunnerJobLost(job_id)
-                resp.raise_for_status()
+                try:
+                    resp = client.get(f"/jobs/{job_id}")
+                    if resp.status_code == 404:
+                        raise RunnerJobLost(job_id)
+                    resp.raise_for_status()
+                except (httpx.TransportError, httpx.HTTPStatusError):
+                    # 장시간 변환 중 폴링 1회 실패로 잡을 버리지 않는다
+                    errors += 1
+                    if errors > 5:
+                        raise
+                    time.sleep(self.poll_interval_sec)
+                    continue
+                errors = 0
                 body = resp.json()
                 if body["status"] == "done":
                     return body["result"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -49,7 +50,7 @@ def partial_hash(path: Path, size: int) -> str:
     h.update(str(size).encode())
     with path.open("rb") as f:
         h.update(f.read(_PARTIAL_CHUNK))
-        if size > _PARTIAL_CHUNK * 2:
+        if size > _PARTIAL_CHUNK:
             f.seek(-_PARTIAL_CHUNK, 2)
             h.update(f.read(_PARTIAL_CHUNK))
     return h.hexdigest()
@@ -163,7 +164,7 @@ def scan(session: Session, dirs: tuple[Path, ...]) -> dict[str, int]:
                 stats["reappeared"] += 1
 
     # 스캔 폴더 아래로 등록돼 있던 파일이 사라졌으면 missing 마킹 (삭제하지 않는다)
-    prefixes = tuple(str(d.resolve()) for d in dirs if d.is_dir())
+    prefixes = tuple(str(d.resolve()) + os.sep for d in dirs if d.is_dir())
     for recording in session.scalars(select(Recording).where(Recording.status != "missing")):
         if recording.path.startswith(prefixes) and recording.path not in seen:
             recording.status = "missing"
