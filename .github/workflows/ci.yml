@@ -12,6 +12,22 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: soriham
+          POSTGRES_USER: soriham
+          POSTGRES_PASSWORD: soriham-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U soriham"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://soriham:soriham-ci@localhost:5432/soriham
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.1
@@ -20,4 +36,5 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
+      - run: uv run alembic upgrade head
       - run: uv run pytest
