@@ -46,6 +46,22 @@ def recover_in_flight(session: Session) -> int:
     return count
 
 
+def requeue_unenriched(session: Session) -> int:
+    """요약 없이 done인 레코드를 엔리치먼트 대상으로 되돌린다(백필·재시도)."""
+    count = 0
+    for recording in session.scalars(
+        select(Recording).where(
+            Recording.status == "done",
+            Recording.summary.is_(None),
+        )
+    ):
+        if recording.segments:
+            recording.status = "enriching"
+            count += 1
+    session.commit()
+    return count
+
+
 def claim_next(session: Session) -> Recording | None:
     """우선순위(최신 녹음 먼저)로 다음 대기 레코드를 집는다. 다중 워커 안전."""
     recording = session.scalars(
@@ -142,17 +158,22 @@ def transcribe_stage(
 
 
 def enrich_stage(session: Session, recording: Recording, enricher: Enricher | None) -> None:
+    """엔리치먼트 실행. 실패해도 녹취록은 확보됐으므로 done으로 두고 에러만 기록한다.
+
+    summary가 비어 있으면 다음 워커 시작 시 재큐잉돼 다시 시도된다.
+    """
     started = datetime.now(UTC)
     if enricher is not None:
         try:
             enricher.enrich(session, recording)
-        except Exception as exc:
-            recording.status = "error"
+        except Exception as exc:  # noqa: BLE001 - 요약 실패가 녹취록을 막지 않게
+            session.rollback()
+            logger.exception("엔리치먼트 실패: %s", recording.filename)
             recording.error = f"enrich: {exc}"
             _log_stage(session, recording, "enrich", started, status="error", error=str(exc))
-            session.commit()
-            raise
-        _log_stage(session, recording, "enrich", started, status="done")
+        else:
+            recording.error = None
+            _log_stage(session, recording, "enrich", started, status="done")
     recording.status = "done"
     session.commit()
 
@@ -196,6 +217,10 @@ def run_worker(
         recovered = recover_in_flight(session)
         if recovered:
             logger.info("중단됐던 %d건을 재개 지점으로 되돌림", recovered)
+        if enricher is not None:
+            requeued = requeue_unenriched(session)
+            if requeued:
+                logger.info("요약 없는 완료 %d건을 엔리치먼트 재큐잉", requeued)
     while True:
         try:
             with session_factory() as session:

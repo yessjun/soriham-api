@@ -16,6 +16,8 @@ class Settings:
     - RUNNER_URL: stt 러너 주소 (로컬 프로세스든 원격 pod든 같은 계약)
     - RUNNER_UPLOAD: true면 오디오를 업로드, 아니면 경로 전달(파일시스템 공유 전제)
     - STT_MODEL / STT_LANGUAGE: 러너에 넘길 모델·언어 (비우면 러너 기본값·자동 감지)
+    - ENRICH_BACKEND: 제목/요약/태그 생성 백엔드 (ollama | claude | off)
+    - OLLAMA_URL / OLLAMA_MODEL: ollama 백엔드 설정
     """
 
     database_url: str
@@ -24,6 +26,9 @@ class Settings:
     runner_upload: bool
     stt_model: str | None
     stt_language: str | None
+    enrich_backend: str
+    ollama_url: str
+    ollama_model: str
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -40,6 +45,9 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         runner_upload=(e.get("RUNNER_UPLOAD") or "").lower() in ("1", "true", "yes"),
         stt_model=e.get("STT_MODEL") or None,
         stt_language=e.get("STT_LANGUAGE") or None,
+        enrich_backend=e.get("ENRICH_BACKEND") or "ollama",
+        ollama_url=e.get("OLLAMA_URL") or "http://localhost:11434",
+        ollama_model=e.get("OLLAMA_MODEL") or "qwen3:8b",
     )
 
 

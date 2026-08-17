@@ -17,6 +17,7 @@ uv run alembic upgrade head
 uv run soriham-api scan     # 녹음 폴더 스캔 등록
 uv run soriham-api watch    # 새 파일 감시 등록
 uv run soriham-api worker   # 변환 파이프라인 워커 (stt 러너 필요)
+                            # 제목/요약/태그는 기본 Ollama(qwen3), ENRICH_BACKEND로 교체
 uv run soriham-api serve    # REST API (기본 8200 포트)
 ```
 
