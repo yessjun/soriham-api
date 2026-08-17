@@ -15,6 +15,11 @@ dependencies = [
     "watchdog>=6.0",
 ]
 
+[project.optional-dependencies]
+claude = [
+    "anthropic>=0.122",
+]
+
 [project.scripts]
 soriham-api = "soriham_api.cli:main"
 

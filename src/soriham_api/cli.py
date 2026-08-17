@@ -45,15 +45,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "worker":
+        from soriham_api.enrich import build_enricher
         from soriham_api.stt_client import RunnerClient
         from soriham_api.worker import run_worker
 
         runner = RunnerClient(base_url=settings.runner_url, upload=settings.runner_upload)
+        enricher = build_enricher(
+            settings.enrich_backend,
+            ollama_url=settings.ollama_url,
+            ollama_model=settings.ollama_model,
+        )
         run_worker(
             session_factory,
             runner,
             model=settings.stt_model,
             language=settings.stt_language,
+            enricher=enricher,
         )
         return 0
 
