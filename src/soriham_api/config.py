@@ -13,10 +13,17 @@ class Settings:
 
     - DATABASE_URL: postgres 접속 문자열 (예: postgresql+psycopg://user:pw@host/db)
     - AUDIO_DIRS: 스캔·감시할 녹음 폴더들 (경로 나열, 구분자 os.pathsep)
+    - RUNNER_URL: stt 러너 주소 (로컬 프로세스든 원격 pod든 같은 계약)
+    - RUNNER_UPLOAD: true면 오디오를 업로드, 아니면 경로 전달(파일시스템 공유 전제)
+    - STT_MODEL / STT_LANGUAGE: 러너에 넘길 모델·언어 (비우면 러너 기본값·자동 감지)
     """
 
     database_url: str
     audio_dirs: tuple[Path, ...]
+    runner_url: str
+    runner_upload: bool
+    stt_model: str | None
+    stt_language: str | None
 
 
 def load_settings(env: dict[str, str] | None = None) -> Settings:
@@ -26,7 +33,14 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if not url:
         raise RuntimeError("DATABASE_URL이 설정돼 있지 않습니다 (.env 확인)")
     dirs = tuple(Path(p).expanduser() for p in (e.get("AUDIO_DIRS") or "").split(os.pathsep) if p)
-    return Settings(database_url=url, audio_dirs=dirs)
+    return Settings(
+        database_url=url,
+        audio_dirs=dirs,
+        runner_url=e.get("RUNNER_URL") or "http://localhost:8100",
+        runner_upload=(e.get("RUNNER_UPLOAD") or "").lower() in ("1", "true", "yes"),
+        stt_model=e.get("STT_MODEL") or None,
+        stt_language=e.get("STT_LANGUAGE") or None,
+    )
 
 
 def _load_dotenv(e: dict[str, str]) -> None:
