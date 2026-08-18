@@ -189,3 +189,24 @@ def test_전사_실패하면_진행_정보를_정리한다(db, tmp_path: Path) -
     assert recording.status == "error"
     assert recording.progress is None
     assert recording.stage_started_at is None
+
+
+def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path) -> None:
+    """마지막 퍼센트를 그대로 두면 그 값에 멈춘 것처럼 보인다."""
+    [recording] = register(db, tmp_path, ["20260818_180000.wav"])
+    seen: list[float | None] = []
+
+    class StageRunner(FakeRunnerClient):
+        def transcribe(
+            self, audio_path, *, model, language, diarize, max_resubmits=2, on_progress=None
+        ):
+            self.calls.append(audio_path)
+            on_progress("transcribe", 0.6)
+            seen.append(recording.progress)
+            on_progress("diarize", None)
+            seen.append(recording.progress)
+            return self.result
+
+    process_one(db, StageRunner(), model=None, language=None, enricher=None)
+
+    assert seen == [0.6, None]

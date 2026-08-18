@@ -126,6 +126,14 @@ def transcribe_stage(
     session.commit()
 
     def report(stage: str | None, ratio: float | None) -> None:
+        if stage is not None and stage != "transcribe":
+            # 화자분리처럼 비율을 낼 수 없는 단계로 넘어갔다. 마지막 값을 그대로 두면
+            # 그 퍼센트에 멈춘 것처럼 보이므로 비우고 경과 시간도 다시 잡는다
+            if recording.progress is not None:
+                recording.progress = None
+                recording.stage_started_at = datetime.now(UTC)
+                session.commit()
+            return
         # 3초 폴링마다 쓰지 않는다 — 1%p 이상 움직였을 때만
         if ratio is None or (
             recording.progress is not None and abs(ratio - recording.progress) < 0.01
