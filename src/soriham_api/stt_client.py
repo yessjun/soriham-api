@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ class RunnerJobLost(Exception):
 
 class RunnerJobFailed(Exception):
     """러너가 잡을 error로 끝냈다."""
+
+
+# (단계, 진행률 0~1 또는 None) — 러너가 진행 정보를 안 주면 (None, None)
+ProgressHook = Callable[[str | None, float | None], None]
 
 
 @dataclass
@@ -62,7 +67,7 @@ class RunnerClient:
             resp.raise_for_status()
             return resp.json()["job_id"]
 
-    def wait(self, job_id: str) -> dict[str, Any]:
+    def wait(self, job_id: str, on_progress: ProgressHook | None = None) -> dict[str, Any]:
         """잡이 끝날 때까지 폴링한다. 러너가 잡을 잊었으면 RunnerJobLost."""
         errors = 0
         with self._client() as client:
@@ -85,6 +90,9 @@ class RunnerClient:
                     return body["result"]
                 if body["status"] == "error":
                     raise RunnerJobFailed(body.get("error") or "러너 잡 실패")
+                if on_progress is not None:
+                    # 진행 필드는 선택이라 없는 러너면 둘 다 None으로 전달된다
+                    on_progress(body.get("stage"), body.get("progress"))
                 time.sleep(self.poll_interval_sec)
 
     def transcribe(
@@ -95,12 +103,13 @@ class RunnerClient:
         language: str | None,
         diarize: bool,
         max_resubmits: int = 2,
+        on_progress: ProgressHook | None = None,
     ) -> dict[str, Any]:
         """제출부터 완료까지. 러너 재시작으로 잡이 사라지면 재제출한다."""
         for attempt in range(max_resubmits + 1):
             job_id = self.submit(audio_path, model=model, language=language, diarize=diarize)
             try:
-                return self.wait(job_id)
+                return self.wait(job_id, on_progress)
             except RunnerJobLost:
                 if attempt == max_resubmits:
                     raise

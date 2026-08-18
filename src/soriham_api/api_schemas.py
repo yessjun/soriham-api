@@ -24,6 +24,9 @@ class RecordingSummary(BaseModel):
     status: str
     language: str | None
     tags: list[TagOut]
+    # 진행 중일 때만 채워진다. eta_sec은 저장하지 않고 응답 시점에 계산한다
+    progress: float | None = None
+    eta_sec: float | None = None
 
 
 class RecordingList(BaseModel):

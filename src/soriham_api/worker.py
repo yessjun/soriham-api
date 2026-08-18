@@ -121,11 +121,26 @@ def transcribe_stage(
     """러너 호출 후 세그먼트를 저장한다(재실행 대비 기존 세그먼트 교체)."""
     started = datetime.now(UTC)
     recording.status = "transcribing"
+    recording.stage_started_at = started
+    recording.progress = None
     session.commit()
+
+    def report(stage: str | None, ratio: float | None) -> None:
+        # 3초 폴링마다 쓰지 않는다 — 1%p 이상 움직였을 때만
+        if ratio is None or (
+            recording.progress is not None and abs(ratio - recording.progress) < 0.01
+        ):
+            return
+        recording.progress = ratio
+        session.commit()
 
     try:
         result = runner.transcribe(
-            Path(recording.path), model=model, language=language, diarize=True
+            Path(recording.path),
+            model=model,
+            language=language,
+            diarize=True,
+            on_progress=report,
         )
         # 결과 파싱·저장 실패도 같은 에러 경로로 — transcribing 상태로 방치되지 않게
         session.execute(delete(Segment).where(Segment.recording_id == recording.id))
@@ -147,12 +162,16 @@ def transcribe_stage(
         session.rollback()
         recording.status = "error"
         recording.error = f"stt: {exc}"
+        recording.progress = None
+        recording.stage_started_at = None
         _log_stage(session, recording, "transcribe", started, status="error", error=str(exc))
         session.commit()
         raise
 
     recording.error = None
     recording.status = "enriching"
+    recording.progress = None
+    recording.stage_started_at = datetime.now(UTC)
     _log_stage(
         session, recording, "transcribe", started, status="done", meta=result.get("meta") or {}
     )
@@ -177,6 +196,8 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
             recording.error = None
             _log_stage(session, recording, "enrich", started, status="done")
     recording.status = "done"
+    recording.progress = None
+    recording.stage_started_at = None
     session.commit()
 
 

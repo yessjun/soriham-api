@@ -75,6 +75,9 @@ class Recording(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text)
     stt_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # 진행 중인 단계의 비율(0~1)과 그 단계 시작 시각. 남은 시간 계산에 쓴다
+    progress: Mapped[float | None] = mapped_column(Double)
+    stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duplicate_of_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("recordings.id", ondelete="SET NULL")
     )

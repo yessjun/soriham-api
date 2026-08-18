@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
@@ -408,6 +409,21 @@ def _apply_filters(
     return stmt
 
 
+def _eta_sec(recording: Recording) -> float | None:
+    """진행률과 단계 경과 시간으로 남은 시간을 추정한다.
+
+    진행률이 없거나 아직 0이면 추정할 근거가 없으므로 None.
+    """
+    progress = recording.progress
+    started = recording.stage_started_at
+    if not progress or started is None or progress >= 1:
+        return None
+    elapsed = (datetime.now(UTC) - started).total_seconds()
+    if elapsed <= 0:
+        return None
+    return elapsed / progress * (1 - progress)
+
+
 def _summary(recording: Recording) -> RecordingSummary:
     return RecordingSummary(
         id=recording.public_id,
@@ -419,6 +435,8 @@ def _summary(recording: Recording) -> RecordingSummary:
         status=recording.status,
         language=recording.language,
         tags=[TagOut(id=t.public_id, name=t.name) for t in recording.tags],
+        progress=recording.progress,
+        eta_sec=_eta_sec(recording),
     )
 
 
