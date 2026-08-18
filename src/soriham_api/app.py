@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import Select, func, or_, select
@@ -29,7 +30,21 @@ from soriham_api.api_schemas import (
 )
 from soriham_api.config import Settings, load_settings
 from soriham_api.db import make_session_factory
+from soriham_api.ingest import (
+    AUDIO_EXTENSIONS,
+    find_duplicate,
+    ingest_file,
+    partial_hash,
+)
 from soriham_api.models import JobLog, Recording, SpeakerName, Tag
+from soriham_api.uploads import (
+    UploadEmpty,
+    UploadTooLarge,
+    cleanup_staging,
+    finalize,
+    safe_filename,
+    stage_upload,
+)
 
 CHUNK_SIZE = 1024 * 256
 
@@ -56,6 +71,13 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    if cfg.upload_dir is not None:
+        # 이전 실행이 중단되며 남긴 미완성 업로드 정리
+        cleanup_staging(cfg.upload_dir)
+    # 해시 판정부터 커밋까지를 직렬화한다 — 동시 업로드가 같은 경로·같은 내용을
+    # 서로 못 보고 지나가면 파일이 덮이거나 중복 거절이 새어 나간다
+    upload_lock = threading.Lock()
 
     def db() -> Iterator[Session]:
         with factory() as session:
@@ -93,6 +115,61 @@ def create_app(
             .offset(offset)
         ).all()
         return RecordingList(items=[_summary(r) for r in rows], total=total or 0)
+
+    @app.post("/api/recordings", response_model=RecordingSummary, status_code=201)
+    def upload_recording(file: UploadFile, session: Session = Depends(db)) -> RecordingSummary:
+        """콘솔에서 올린 오디오를 보관 폴더에 저장하고 큐에 등록한다."""
+        if cfg.upload_dir is None:
+            raise HTTPException(503, "업로드가 설정돼 있지 않습니다 (UPLOAD_DIR)")
+        name = safe_filename(file.filename)
+        if name is None:
+            raise HTTPException(422, "파일 이름이 없습니다")
+        suffix = Path(name).suffix.lower()
+        if suffix not in AUDIO_EXTENSIONS:
+            raise HTTPException(415, f"지원하지 않는 오디오 형식입니다: {suffix or '확장자 없음'}")
+
+        try:
+            staged = stage_upload(file.file, cfg.upload_dir, cfg.max_upload_bytes)
+        except UploadTooLarge:
+            limit_mb = cfg.max_upload_bytes // (1024 * 1024)
+            raise HTTPException(413, f"파일이 너무 큽니다 (최대 {limit_mb}MB)") from None
+        except UploadEmpty:
+            raise HTTPException(422, "빈 파일입니다") from None
+
+        def registered(path: Path) -> bool:
+            return (
+                session.scalar(select(Recording.id).where(Recording.path == str(path.resolve())))
+                is not None
+            )
+
+        with upload_lock:
+            dest: Path | None = None
+            try:
+                digest = partial_hash(staged, staged.stat().st_size)
+                original = find_duplicate(session, digest)
+                if original is not None:
+                    # 같은 내용이 이미 있으면 사본을 남기지 않고 기존 항목으로 돌려보낸다
+                    raise HTTPException(
+                        409,
+                        {
+                            "message": f"이미 등록된 파일입니다: {original.filename}",
+                            "recording_id": str(original.public_id),
+                        },
+                    )
+                # 디스크에 없더라도 DB에 등록된 경로는 피한다 — 파일만 지워진 기존
+                # 녹음의 자리를 새 파일이 차지하면 그 행이 엉뚱한 오디오를 가리킨다
+                dest = finalize(staged, cfg.upload_dir, name, taken=registered)
+                recording = ingest_file(session, dest)
+                if recording is None:  # registered()가 걸렀어야 하는 경우
+                    raise HTTPException(500, "업로드 경로를 정하지 못했습니다")
+                session.commit()
+            except BaseException:
+                session.rollback()
+                staged.unlink(missing_ok=True)
+                if dest is not None:
+                    dest.unlink(missing_ok=True)
+                raise
+        return _summary(recording)
 
     @app.get("/api/recordings/{public_id}", response_model=RecordingDetail)
     def recording_detail(public_id: uuid.UUID, session: Session = Depends(db)) -> RecordingDetail:

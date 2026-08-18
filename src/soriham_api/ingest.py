@@ -110,6 +110,22 @@ def resume_status(recording: Recording) -> str:
     return "pending"
 
 
+def find_duplicate(session: Session, digest: str) -> Recording | None:
+    """같은 부분 해시로 이미 등록된 원본을 찾는다.
+
+    duplicate는 물론 missing도 제외한다 — 파일이 사라진 행을 원본으로 치면, 백업본을
+    다시 넣으려 할 때 중복으로 막혀 복구할 방법이 없어진다.
+    """
+    return session.scalar(
+        select(Recording)
+        .where(
+            Recording.partial_hash == digest,
+            Recording.status.not_in(("duplicate", "missing")),
+        )
+        .order_by(Recording.id)
+    )
+
+
 def ingest_file(session: Session, path: Path) -> Recording | None:
     """파일 하나를 등록한다. 이미 등록된 경로면 재등장 처리만 하고 None을 돌려준다."""
     path = path.resolve()
@@ -122,11 +138,7 @@ def ingest_file(session: Session, path: Path) -> Recording | None:
 
     size = path.stat().st_size
     digest = partial_hash(path, size)
-    original = session.scalar(
-        select(Recording)
-        .where(Recording.partial_hash == digest, Recording.status != "duplicate")
-        .order_by(Recording.id)
-    )
+    original = find_duplicate(session, digest)
     recording = Recording(
         path=str(path),
         filename=path.name,
