@@ -197,6 +197,7 @@ def create_app(
                     end_sec=s.end_sec,
                     speaker_key=s.speaker_key,
                     text=s.text,
+                    kind=s.kind,
                 )
                 for s in recording.segments
             ],
@@ -324,6 +325,7 @@ def create_app(
                         end_sec=seg.end_sec,
                         speaker_key=seg.speaker_key,
                         text=seg.text,
+                        kind=seg.kind,
                     ),
                 )
             )

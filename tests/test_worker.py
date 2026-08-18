@@ -229,3 +229,25 @@ def test_화자분리_실패는_화면에_남는다(db, tmp_path: Path) -> None:
     assert recording.summary == "요약"
     assert recording.error is not None
     assert "디코더 실패" in recording.error
+
+
+def test_소음_세그먼트는_요약에_들어가지_않는다(db, tmp_path: Path) -> None:
+    [recording] = register(db, tmp_path, ["20260818_200000.wav"])
+    result = dict(RESULT)
+    result["segments"] = [
+        {"start": 0.0, "end": 1.0, "text": "실제 발언", "speaker": None, "kind": "speech"},
+        {"start": 1.0, "end": 5.0, "text": "", "speaker": None, "kind": "noise"},
+    ]
+    captured: list[str] = []
+
+    class Enricher:
+        def enrich(self, session, rec) -> None:
+            from soriham_api.enrich import build_transcript
+
+            captured.append(build_transcript(session, rec))
+
+    process_one(db, FakeRunnerClient(result=result), model=None, language=None, enricher=Enricher())
+
+    db.refresh(recording)
+    assert [s.kind for s in recording.segments] == ["speech", "noise"]
+    assert captured == ["실제 발언"]

@@ -165,6 +165,7 @@ def transcribe_stage(
                     speaker_key=seg.get("speaker"),
                     text=seg["text"],
                     words=seg.get("words") or None,
+                    kind=seg.get("kind") or "speech",
                 )
             )
         recording.language = result.get("language")
