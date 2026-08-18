@@ -81,6 +81,8 @@ def build_transcript(session: Session, recording: Recording) -> str:
     names = {n.speaker_key: n.display_name for n in recording.speaker_names}
     lines = []
     for seg in recording.segments:
+        if seg.kind != "speech":  # 소음 구간은 요약에 넣지 않는다
+            continue
         speaker = names.get(seg.speaker_key, seg.speaker_key) if seg.speaker_key else None
         lines.append(f"{speaker}: {seg.text}" if speaker else seg.text)
     return "\n".join(lines)

@@ -40,6 +40,8 @@ class SegmentOut(BaseModel):
     end_sec: float
     speaker_key: str | None
     text: str
+    # speech | noise
+    kind: str = "speech"
 
 
 class RecordingDetail(RecordingSummary):

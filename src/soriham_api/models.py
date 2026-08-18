@@ -105,6 +105,8 @@ class Segment(Base):
     speaker_key: Mapped[str | None] = mapped_column(Text)
     text: Mapped[str] = mapped_column(Text)
     words: Mapped[list[Any] | None] = mapped_column(JSONB)
+    # speech | noise — noise는 말이 아닌 구간을 러너가 판정해 표시한 자리다
+    kind: Mapped[str] = mapped_column(Text, default="speech", server_default="speech")
 
     recording: Mapped[Recording] = relationship(back_populates="segments")
 
