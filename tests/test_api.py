@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -170,3 +171,39 @@ def test_stats(client, db, tmp_path: Path):
     assert statuses == {"done": 1, "error": 1}
     assert body["speed_ratio"] is not None
     assert body["recent_errors"][0]["id"] == str(rec2.public_id)
+
+
+def test_진행률과_남은_시간이_응답에_실린다(client, db, tmp_path: Path) -> None:
+    recording = make_recording(db, tmp_path, "20260818_150000.wav")
+    recording.status = "transcribing"
+    recording.progress = 0.25
+    recording.stage_started_at = datetime.now(UTC) - timedelta(seconds=60)
+    db.commit()
+
+    body = client.get(f"/api/recordings/{recording.public_id}").json()
+
+    assert body["progress"] == 0.25
+    # 25%에 60초 걸렸으면 남은 75%는 약 180초
+    assert 170 < body["eta_sec"] < 190
+
+
+def test_진행률이_없으면_남은_시간도_없다(client, db, tmp_path: Path) -> None:
+    recording = make_recording(db, tmp_path, "20260818_160000.wav")
+
+    body = client.get(f"/api/recordings/{recording.public_id}").json()
+
+    assert body["progress"] is None
+    assert body["eta_sec"] is None
+
+
+def test_진행률이_0이면_남은_시간을_추정하지_않는다(client, db, tmp_path: Path) -> None:
+    """0으로 나누지 않고, 근거 없는 추정을 내놓지도 않는다."""
+    recording = make_recording(db, tmp_path, "20260818_170000.wav")
+    recording.status = "transcribing"
+    recording.progress = 0.0
+    recording.stage_started_at = datetime.now(UTC) - timedelta(seconds=30)
+    db.commit()
+
+    body = client.get(f"/api/recordings/{recording.public_id}").json()
+
+    assert body["eta_sec"] is None

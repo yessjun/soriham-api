@@ -25,13 +25,28 @@ RESULT = {
 
 
 class FakeRunnerClient:
-    def __init__(self, result=None, error: Exception | None = None) -> None:
+    def __init__(
+        self, result=None, error: Exception | None = None, progress: tuple[float, ...] = ()
+    ) -> None:
         self.result = result or RESULT
         self.error = error
         self.calls: list[Path] = []
+        self.progress = progress
 
-    def transcribe(self, audio_path: Path, *, model, language, diarize, max_resubmits=2):
+    def transcribe(
+        self,
+        audio_path: Path,
+        *,
+        model,
+        language,
+        diarize,
+        max_resubmits=2,
+        on_progress=None,
+    ):
         self.calls.append(audio_path)
+        if on_progress is not None:
+            for ratio in self.progress:
+                on_progress("transcribe", ratio)
         if self.error is not None:
             raise self.error
         return self.result
@@ -125,3 +140,52 @@ def test_enriching_recording_skips_transcribe(db, tmp_path: Path):
     db.refresh(row)
     assert row.status == "done"
     assert len(runner.calls) == 1  # 전사는 다시 돌지 않음
+
+
+def test_전사_진행률이_저장되고_완료_시_정리된다(db, tmp_path: Path) -> None:
+    [recording] = register(db, tmp_path, ["20260818_120000.wav"])
+    runner = FakeRunnerClient(progress=(0.2, 0.5, 0.9))
+
+    process_one(db, runner, model=None, language=None, enricher=None)
+
+    db.refresh(recording)
+    assert recording.status == "done"
+    # 진행 정보는 끝나면 남기지 않는다 (목록에 100%가 박제되지 않게)
+    assert recording.progress is None
+    assert recording.stage_started_at is None
+
+
+def test_진행률이_1퍼센트포인트_미만이면_쓰지_않는다(db, tmp_path: Path) -> None:
+    """3초 폴링마다 커밋하지 않기 위한 임계값."""
+    [recording] = register(db, tmp_path, ["20260818_130000.wav"])
+    commits: list[float | None] = []
+
+    runner = FakeRunnerClient(progress=(0.30, 0.302, 0.35))
+    original = db.commit
+
+    def spy() -> None:
+        commits.append(recording.progress)
+        original()
+
+    db.commit = spy  # type: ignore[method-assign]
+    try:
+        process_one(db, runner, model=None, language=None, enricher=None)
+    finally:
+        db.commit = original  # type: ignore[method-assign]
+
+    # 0.302는 0.30과 1%p 미만 차이라 건너뛰고, 0.30과 0.35만 반영된다
+    assert 0.30 in commits
+    assert 0.302 not in commits
+    assert 0.35 in commits
+
+
+def test_전사_실패하면_진행_정보를_정리한다(db, tmp_path: Path) -> None:
+    [recording] = register(db, tmp_path, ["20260818_140000.wav"])
+    runner = FakeRunnerClient(error=RuntimeError("러너 실패"), progress=(0.4,))
+
+    process_one(db, runner, model=None, language=None, enricher=None)
+
+    db.refresh(recording)
+    assert recording.status == "error"
+    assert recording.progress is None
+    assert recording.stage_started_at is None
