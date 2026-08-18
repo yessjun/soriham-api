@@ -21,6 +21,9 @@ from soriham_api.stt_client import RunnerClient
 
 logger = logging.getLogger(__name__)
 
+# 화자분리 실패는 녹취록을 막지 않되 화면에 남긴다 — 접두사로 엔리치먼트 에러와 구분한다
+DIARIZE_ERROR_PREFIX = "화자분리 실패: "
+
 # 워커가 잡을 수 있는 대기 상태와, 재시작 시 재개 대상인 진행 중 상태
 CLAIMABLE = ("pending",)
 IN_FLIGHT = ("transcribing", "diarizing", "enriching")
@@ -176,7 +179,11 @@ def transcribe_stage(
         session.commit()
         raise
 
-    recording.error = None
+    # 화자분리가 실패해도 녹취록은 살아 있으므로 진행은 시키되, 조용히 넘기지 않는다
+    meta = recording.stt_meta or {}
+    recording.error = (
+        f"{DIARIZE_ERROR_PREFIX}{meta['diarize_error']}" if meta.get("diarize_error") else None
+    )
     recording.status = "enriching"
     recording.progress = None
     recording.stage_started_at = datetime.now(UTC)
@@ -192,6 +199,8 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
     summary가 비어 있으면 다음 워커 시작 시 재큐잉돼 다시 시도된다.
     """
     started = datetime.now(UTC)
+    # 전사 단계가 남긴 경고는 엔리치먼트가 성공해도 지우지 않는다
+    carried = recording.error if (recording.error or "").startswith(DIARIZE_ERROR_PREFIX) else None
     if enricher is not None:
         try:
             enricher.enrich(session, recording)
@@ -201,7 +210,7 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
             recording.error = f"enrich: {exc}"
             _log_stage(session, recording, "enrich", started, status="error", error=str(exc))
         else:
-            recording.error = None
+            recording.error = carried
             _log_stage(session, recording, "enrich", started, status="done")
     recording.status = "done"
     recording.progress = None

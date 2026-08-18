@@ -210,3 +210,22 @@ def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path)
     process_one(db, StageRunner(), model=None, language=None, enricher=None)
 
     assert seen == [0.6, None]
+
+
+def test_화자분리_실패는_화면에_남는다(db, tmp_path: Path) -> None:
+    """녹취록은 살리되 조용히 넘기지 않는다. 엔리치먼트가 성공해도 지워지지 않는다."""
+    [recording] = register(db, tmp_path, ["20260818_190000.wav"])
+    result = dict(RESULT)
+    result["meta"] = {"diarized": False, "diarize_error": "RuntimeError: 디코더 실패"}
+
+    class Enricher:
+        def enrich(self, session, rec) -> None:
+            rec.summary = "요약"
+
+    process_one(db, FakeRunnerClient(result=result), model=None, language=None, enricher=Enricher())
+
+    db.refresh(recording)
+    assert recording.status == "done"
+    assert recording.summary == "요약"
+    assert recording.error is not None
+    assert "디코더 실패" in recording.error
