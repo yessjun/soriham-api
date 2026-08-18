@@ -8,3 +8,6 @@ data/
 config.yaml
 .env
 *.egg-info/
+
+# 업로드된 원본 오디오
+uploads/

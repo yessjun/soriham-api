@@ -17,6 +17,9 @@ class Settings:
     - RUNNER_UPLOAD: true면 오디오를 업로드, 아니면 경로 전달(파일시스템 공유 전제)
     - STT_MODEL / STT_LANGUAGE: 러너에 넘길 모델·언어 (비우면 러너 기본값·자동 감지)
     - CORS_ORIGINS: 콘솔 오리진 목록(콤마 구분) — 브라우저 경유 접근을 콘솔로 한정
+    - UPLOAD_DIR: 콘솔 업로드본을 저장할 폴더 (비우면 업로드 기능 비활성).
+      AUDIO_DIRS와 겹치게 두지 않는다 — 감시와 업로드가 같은 파일을 중복 등록한다
+    - MAX_UPLOAD_MB: 업로드 한 건의 크기 상한 (기본 4096)
     - ENRICH_BACKEND: 제목/요약/태그 생성 백엔드 (ollama | claude | off)
     - OLLAMA_URL / OLLAMA_MODEL: ollama 백엔드 설정
     """
@@ -28,6 +31,8 @@ class Settings:
     stt_model: str | None
     stt_language: str | None
     cors_origins: tuple[str, ...]
+    upload_dir: Path | None
+    max_upload_bytes: int
     enrich_backend: str
     ollama_url: str
     ollama_model: str
@@ -52,6 +57,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
             for o in (e.get("CORS_ORIGINS") or "http://localhost:5174").split(",")
             if o.strip()
         ),
+        upload_dir=Path(e["UPLOAD_DIR"]).expanduser() if e.get("UPLOAD_DIR") else None,
+        max_upload_bytes=int(e.get("MAX_UPLOAD_MB") or 4096) * 1024 * 1024,
         enrich_backend=e.get("ENRICH_BACKEND") or "ollama",
         ollama_url=e.get("OLLAMA_URL") or "http://localhost:11434",
         ollama_model=e.get("OLLAMA_MODEL") or "qwen3:8b",
