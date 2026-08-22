@@ -13,6 +13,7 @@ from sqlalchemy import (
     Double,
     ForeignKey,
     Identity,
+    Index,
     Integer,
     Text,
     UniqueConstraint,
@@ -57,6 +58,30 @@ class Recording(TimestampMixin, Base):
             "status in ({})".format(", ".join(f"'{s}'" for s in RECORDING_STATUSES)),
             name="recordings_status_check",
         ),
+        # 큐 소비용. 마이그레이션에만 있던 인덱스를 메타데이터에도 선언한다 — 선언이
+        # 없으면 드리프트 검사가 매번 "지워야 할 인덱스"로 잡는다
+        Index("ix_recordings_status", "status"),
+        Index("ix_recordings_recorded_at", text("recorded_at DESC NULLS LAST")),
+        # 한국어 부분 문자열 검색(pg_trgm). 표현식이 아니라 컬럼 인덱스지만
+        # 연산자 클래스가 기본과 달라 postgresql_ops를 명시해야 실물과 일치한다
+        Index(
+            "ix_recordings_filename_trgm",
+            "filename",
+            postgresql_using="gin",
+            postgresql_ops={"filename": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_recordings_title_trgm",
+            "title",
+            postgresql_using="gin",
+            postgresql_ops={"title": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_recordings_summary_trgm",
+            "summary",
+            postgresql_using="gin",
+            postgresql_ops={"summary": "gin_trgm_ops"},
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
@@ -93,7 +118,15 @@ class Recording(TimestampMixin, Base):
 
 class Segment(Base):
     __tablename__ = "segments"
-    __table_args__ = (UniqueConstraint("recording_id", "idx"),)
+    __table_args__ = (
+        UniqueConstraint("recording_id", "idx"),
+        Index(
+            "ix_segments_text_trgm",
+            "text",
+            postgresql_using="gin",
+            postgresql_ops={"text": "gin_trgm_ops"},
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     recording_id: Mapped[int] = mapped_column(
