@@ -15,8 +15,10 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    # 접속 문자열은 alembic.ini가 아니라 환경(.env)에서 읽는다 — 시크릿 비커밋 원칙
-    return load_settings().database_url
+    # 접속 문자열은 alembic.ini가 아니라 환경(.env)에서 읽는다 — 시크릿 비커밋 원칙.
+    # 다만 호출자가 프로그램적으로 지정했으면(테스트가 임시 DB에 적용할 때) 그쪽이 우선.
+    override = config.get_main_option("sqlalchemy.url", None)
+    return override or load_settings().database_url
 
 
 def run_migrations_offline() -> None:
