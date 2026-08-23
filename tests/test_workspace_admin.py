@@ -327,7 +327,7 @@ def test_이상한_초대_입력은_422로_거절한다(client, workspace, body)
 
 
 def test_이메일을_지정한_초대는_미리보기도_그_사람만_본다(client, app, workspace, friend):
-    """수락은 막히는데 이름은 새는 상태였다. 지정 초대의 요지가 미리보기에서 무너진다."""
+    """수락은 막히고 이름만 새는 상태였다. 이메일을 지정한 뜻이 미리보기에서 사라진다."""
     issued = client.post(
         f"/api/workspaces/{workspace.public_id}/invites",
         json={"email": "someone-else@example.com"},

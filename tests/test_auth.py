@@ -24,7 +24,7 @@ def user(db):
 
 
 def test_이메일은_소문자로_정규화돼_저장된다(db, user):
-    """스키마의 lower() CHECK가 정규화를 강제한다 — 안 하면 INSERT에서 터진다."""
+    """스키마에 lower() CHECK가 있어서 정규화를 빠뜨리면 INSERT가 터진다."""
     assert user.email == "someone@example.com"
 
 

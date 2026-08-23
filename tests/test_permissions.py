@@ -197,7 +197,7 @@ def test_공유받은_사람도_링크_잠금과_무관하다(db, workspace, rec
 
 
 def test_링크를_뺀_권한이_링크_권한을_섞지_않는다(db, rec):
-    """resolve_own_perm이 링크에서 온 VIEW를 지우지 못하면 잠금 판정이 통째로 무너진다."""
+    """resolve_own_perm이 링크에서 온 VIEW를 지우지 못하면 잠금 판정이 전부 틀어진다."""
     principal = Principal(link_recording_id=rec.id)
     assert resolve_recording_perm(db, principal, rec) == Perm.VIEW
     assert resolve_own_perm(db, principal, rec) == Perm.NONE

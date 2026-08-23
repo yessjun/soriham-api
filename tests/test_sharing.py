@@ -204,7 +204,7 @@ def test_틀린_비밀번호로는_열리지_않는다(client, guest, mine):
 def test_잠금_해제_쿠키는_그_링크_경로에만_붙는다(client, guest, mine):
     """쿠키가 모든 주소에 실리면 링크 하나를 푼 브라우저가 그 사실을 계속 흘린다.
 
-    값 자체도 링크마다 다르지만(해시에서 파생한다) 경로를 좁히는 것이 앞선 방벽이다.
+    값 자체도 링크마다 다르지만(해시에서 파생한다) 경로를 좁히는 것이 앞선 검사다.
     이 단언이 없으면 경로를 넓혀도 아무 테스트가 울지 않는다.
     """
     token = make_link(client, mine, password=LINK_PASSWORD)["token"]
@@ -238,7 +238,7 @@ def test_비밀번호를_바꾸면_나간_잠금_해제가_죽는다(client, gue
 
 
 def test_공백만_넣은_비밀번호는_링크를_주지_않는다(client, mine):
-    """걸었다고 믿는데 안 걸린 링크가 나가는 것이 가장 나쁘다."""
+    """비밀번호를 걸었다고 믿는데 실제로는 안 걸린 링크가 나간다."""
     resp = client.post(f"/api/recordings/{mine.public_id}/links", json={"password": "   "})
 
     assert resp.status_code == 422

@@ -21,8 +21,8 @@ from .models import Recording, User, Workspace, WorkspaceMember
 from .permissions import Perm, Principal, resolve_recording_perm, resolve_workspace_perm
 from .ratelimit import Limit, TooManyAttempts
 
-# 안전하지 않은 메서드에만 CSRF 헤더를 요구한다. GET을 면제하는 것이 <audio> 태그가
-# 도는 보증이다 — 그 태그는 헤더를 실을 수 없다
+# 안전하지 않은 메서드에만 CSRF 헤더를 요구한다. <audio> 태그는 헤더를 실을 수 없어서
+# GET을 면제해야 재생이 된다
 CSRF_HEADER = "x-csrf-token"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
