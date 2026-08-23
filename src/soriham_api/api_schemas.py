@@ -152,6 +152,36 @@ class MemberOut(BaseModel):
     joined_at: datetime
 
 
+class InviteIn(BaseModel):
+    role: str = "member"
+    # 지정하면 그 사람만 받을 수 있다. 비우면 링크를 가진 누구나
+    email: str | None = None
+    expires_in_days: int | None = 14
+    max_uses: int = 1
+
+
+class InviteOut(BaseModel):
+    id: uuid.UUID
+    email: str | None
+    role: str
+    expires_at: datetime | None
+    max_uses: int
+    uses: int
+    created_at: datetime
+
+
+class IssuedInviteOut(InviteOut):
+    # 원문 토큰은 발급 응답에만 실린다
+    token: str
+
+
+class InvitePreviewOut(BaseModel):
+    """초대를 받은 사람 화면이 그릴 것. 워크스페이스 이름 말고는 담지 않는다."""
+
+    workspace_name: str
+    role: str
+
+
 class WorkspaceCreateIn(BaseModel):
     name: str
     slug: str

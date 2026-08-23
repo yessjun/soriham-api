@@ -50,6 +50,7 @@ from soriham_api.quota import (
 )
 from soriham_api.routes_auth import register as register_auth_routes
 from soriham_api.routes_sharing import register as register_sharing_routes
+from soriham_api.routes_workspaces import register as register_workspace_routes
 from soriham_api.serializers import recording_summary as _summary
 from soriham_api.serializers import segment_out
 from soriham_api.sharing import share_counts
@@ -117,6 +118,7 @@ def create_app(
     manageable = deps.recording_at(Perm.MANAGE)
     register_auth_routes(app, deps)
     register_sharing_routes(app, deps)
+    register_workspace_routes(app, deps)
 
     @app.get("/api/workspaces/{workspace_id}/recordings", response_model=RecordingList)
     def list_recordings(

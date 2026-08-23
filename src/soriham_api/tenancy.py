@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .auth import hash_password, new_token, token_hash
 from .models import (
+    WORKSPACE_ROLES,
     Invite,
     Recording,
     RecordingShare,
@@ -449,3 +450,113 @@ def bootstrap(
     user.default_workspace_id = workspace.id
     session.flush()
     return user, workspace, True
+
+
+class MemberInvalid(Exception):
+    """구성원 변경을 할 수 없다. 메시지는 사용자에게 그대로 보여진다."""
+
+
+def list_members(session: Session, workspace: Workspace) -> list[tuple[WorkspaceMember, User]]:
+    rows = session.execute(
+        select(WorkspaceMember, User)
+        .join(User, User.id == WorkspaceMember.user_id)
+        .where(WorkspaceMember.workspace_id == workspace.id)
+        .order_by(WorkspaceMember.id)
+    ).all()
+    return [(member, user) for member, user in rows]
+
+
+def find_member(session: Session, workspace: Workspace, user: User) -> WorkspaceMember | None:
+    return session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.user_id == user.id,
+        )
+    )
+
+
+def set_member_role(
+    session: Session, workspace: Workspace, user: User, role: str
+) -> WorkspaceMember:
+    """역할을 바꾼다. 소유자는 이 길로 만들지도 없애지도 못한다.
+
+    소유권 이전은 범위 밖이다. 여기서 `owner`를 허용하면 부분 유니크 인덱스가
+    IntegrityError로 거절하는데, 그건 사용자에게 500으로 보인다.
+    """
+    if role not in WORKSPACE_ROLES:
+        raise MemberInvalid(f"역할은 {', '.join(WORKSPACE_ROLES)} 중 하나여야 합니다")
+    if role == "owner":
+        raise MemberInvalid("소유권 이전은 아직 지원하지 않습니다")
+    member = find_member(session, workspace, user)
+    if member is None:
+        raise MemberInvalid("이 워크스페이스의 구성원이 아닙니다")
+    if member.role == "owner":
+        raise MemberInvalid("소유자의 역할은 바꿀 수 없습니다")
+    member.role = role
+    session.flush()
+    return member
+
+
+def remove_member(session: Session, workspace: Workspace, user: User) -> None:
+    """구성원을 뺀다. 녹음은 워크스페이스 것이므로 그대로 남는다."""
+    member = find_member(session, workspace, user)
+    if member is None:
+        raise MemberInvalid("이 워크스페이스의 구성원이 아닙니다")
+    if member.role == "owner":
+        raise MemberInvalid("소유자는 뺄 수 없습니다")
+    session.delete(member)
+    session.flush()
+    if user.default_workspace_id == workspace.id:
+        # 기본 워크스페이스가 없어진 사람이 로그인하면 콘솔이 어디로 갈지 모른다
+        user.default_workspace_id = session.scalar(
+            select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user.id)
+        )
+        session.flush()
+
+
+def list_invites(session: Session, workspace: Workspace) -> list[Invite]:
+    """살아있는 초대만. 철회·소진된 것은 화면에 남을 이유가 없다."""
+    now = datetime.now(UTC)
+    rows = session.scalars(
+        select(Invite)
+        .where(Invite.workspace_id == workspace.id, Invite.revoked_at.is_(None))
+        .order_by(Invite.id)
+    ).all()
+    return [
+        row
+        for row in rows
+        if row.uses < row.max_uses and (row.expires_at is None or row.expires_at > now)
+    ]
+
+
+def revoke_invite(session: Session, workspace: Workspace, public_id) -> bool:
+    """철회. 워크스페이스로 범위를 좁혀 찾는다 — 남의 초대 id로는 아무것도 못 지운다."""
+    invite = session.scalar(
+        select(Invite).where(
+            Invite.workspace_id == workspace.id,
+            Invite.public_id == public_id,
+            Invite.revoked_at.is_(None),
+        )
+    )
+    if invite is None:
+        return False
+    invite.revoked_at = datetime.now(UTC)
+    session.flush()
+    return True
+
+
+def peek_invite(session: Session, raw_token: str, *, now: datetime | None = None) -> Invite:
+    """받는 사람 화면이 "어디로 부르는 초대인지"를 그리기 위한 조회.
+
+    유효하지 않은 초대는 `accept_invite`와 똑같이 구분 없이 거절한다.
+    """
+    now = now or datetime.now(UTC)
+    invite = session.scalar(select(Invite).where(Invite.token_hash == token_hash(raw_token)))
+    if (
+        invite is None
+        or invite.revoked_at is not None
+        or (invite.expires_at is not None and invite.expires_at <= now)
+        or invite.uses >= invite.max_uses
+    ):
+        raise InviteInvalid("초대가 유효하지 않습니다")
+    return invite
