@@ -78,7 +78,7 @@ def test_enricher_keeps_user_title(db, tmp_path: Path, workspace):
 
 def test_enrich_failure_still_marks_done(db, tmp_path: Path, workspace):
     class FailingEnricher:
-        def enrich(self, session, recording):
+        def enrich(self, session, recording, **_):
             raise RuntimeError("모델 응답 없음")
 
     register(db, tmp_path, ["a.wav"], workspace)
@@ -93,7 +93,7 @@ def test_requeue_unenriched_retries_failed_summaries(db, tmp_path: Path, workspa
     register(db, tmp_path, ["a.wav"], workspace)
 
     class FailingEnricher:
-        def enrich(self, session, recording):
+        def enrich(self, session, recording, **_):
             raise RuntimeError("일시 실패")
 
     process_one(db, FakeRunnerClient(), enricher=FailingEnricher())

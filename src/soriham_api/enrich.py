@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -88,16 +89,25 @@ def build_transcript(session: Session, recording: Recording) -> str:
     return "\n".join(lines)
 
 
-def summarize(generator: Generator, transcript: str) -> EnrichResult:
-    """녹취록 하나를 (필요 시 청크 요약을 거쳐) 제목·요약·태그로 만든다."""
+def summarize(
+    generator: Generator, transcript: str, *, on_step: Callable[[], None] | None = None
+) -> EnrichResult:
+    """녹취록 하나를 (필요 시 청크 요약을 거쳐) 제목·요약·태그로 만든다.
+
+    `on_step`은 청크 하나가 끝날 때마다 불린다. 긴 회의는 청크마다 LLM을 부르느라
+    몇 분씩 걸리는데, 그동안 아무 기록도 안 남으면 옆 워커가 죽은 작업으로 본다.
+    """
     if len(transcript) > CHUNK_CHARS:
         chunks = [transcript[i : i + CHUNK_CHARS] for i in range(0, len(transcript), CHUNK_CHARS)]
-        partials = [
-            generator.generate_text(
-                CHUNK_PROMPT.format(index=i + 1, total=len(chunks), chunk=chunk)
+        partials = []
+        for i, chunk in enumerate(chunks):
+            partials.append(
+                generator.generate_text(
+                    CHUNK_PROMPT.format(index=i + 1, total=len(chunks), chunk=chunk)
+                )
             )
-            for i, chunk in enumerate(chunks)
-        ]
+            if on_step is not None:
+                on_step()
         prompt = COMBINE_PROMPT.format(transcript="\n\n".join(partials))
     else:
         prompt = ENRICH_PROMPT.format(transcript=transcript)
@@ -116,13 +126,15 @@ class LlmEnricher:
     def __init__(self, generator: Generator) -> None:
         self._generator = generator
 
-    def enrich(self, session: Session, recording: Recording) -> None:
+    def enrich(
+        self, session: Session, recording: Recording, *, on_step: Callable[[], None] | None = None
+    ) -> None:
         transcript = build_transcript(session, recording)
         if not transcript.strip():
             logger.info("녹취록이 비어 있어 엔리치먼트 생략: %s", recording.filename)
             recording.summary = ""  # 재큐잉 대상에서 제외(요약 불가 확정)
             return
-        result = summarize(self._generator, transcript)
+        result = summarize(self._generator, transcript, on_step=on_step)
 
         if recording.title is None and result.title:
             recording.title = result.title

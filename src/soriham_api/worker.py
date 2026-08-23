@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -50,7 +51,9 @@ MAINTENANCE_EVERY = 20
 class Enricher(Protocol):
     """제목·요약·태그 생성기. 엔리치먼트 단계에서 구현체가 붙는다."""
 
-    def enrich(self, session: Session, recording: Recording) -> None: ...
+    def enrich(
+        self, session: Session, recording: Recording, *, on_step: Callable[[], None] | None = None
+    ) -> None: ...
 
 
 def recover_in_flight(session: Session, *, now: datetime | None = None) -> int:
@@ -68,6 +71,9 @@ def recover_in_flight(session: Session, *, now: datetime | None = None) -> int:
     for recording in session.scalars(stale):
         # 세그먼트까지 저장돼 있으면 엔리치먼트 대기로 돌아간다
         recording.status = resume_status(recording)
+        # 옛 진행률을 달고 큐로 돌아가면 화면이 엉뚱한 퍼센트를 그린다
+        recording.progress = None
+        recording.stage_started_at = None
         count += 1
         logger.info("재개: %s -> %s", recording.filename, recording.status)
     session.commit()
@@ -94,6 +100,8 @@ def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
                 else_="pending",
             ),
             error=None,
+            progress=None,
+            stage_started_at=None,
         )
     )
     session.commit()
@@ -130,11 +138,17 @@ def idle_maintenance(session_factory: sessionmaker[Session]) -> None:
     상시 돌고 유휴 시간이 있다.
     """
     with session_factory() as session:
+        # 기동할 때만 회수하면, 단계 중간에 상태가 굳은 행은 워커를 다시 띄울 때까지
+        # 처리 중으로 남는다. 백로그를 몇 주씩 도는 동안 그럴 일이 없다. 5분 조건과
+        # 하트비트가 살아 있는 작업을 지켜주므로 주기적으로 돌려도 안전하다
+        recovered = recover_in_flight(session)
         released = release_quota_blocked(session)
         swept = sweep_sessions(session)
         attempts = sweep_attempts(session)
         if swept or attempts:
             session.commit()
+    if recovered:
+        logger.info("멈춘 채 남아 있던 %d건을 재개 지점으로 되돌림", recovered)
     if released:
         logger.info("한도가 풀려 %d건을 큐로 되돌림", released)
     if swept or attempts:
@@ -409,8 +423,18 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
     # 전사 단계가 남긴 경고는 엔리치먼트가 성공해도 지우지 않는다
     carried = recording.error if (recording.error or "").startswith(DIARIZE_ERROR_PREFIX) else None
     if enricher is not None:
+        last_beat = started
+
+        def alive() -> None:
+            # 요약은 LLM 호출이라 긴 녹취록이면 청크마다 몇 분씩 걸린다. 아무 기록도
+            # 안 남기면 옆 워커가 죽은 작업으로 보고 같은 녹취록을 두 번 요약한다
+            nonlocal last_beat
+            now = datetime.now(UTC)
+            if _beat(session, recording, now, last_beat):
+                last_beat = now
+
         try:
-            enricher.enrich(session, recording)
+            enricher.enrich(session, recording, on_step=alive)
         except Exception as exc:  # noqa: BLE001 - 요약 실패가 녹취록을 막지 않게
             session.rollback()
             logger.exception("엔리치먼트 실패: %s", recording.filename)
@@ -488,14 +512,17 @@ def run_worker(
     idle_sleep_sec: float = 5.0,
 ) -> None:
     """워커 메인 루프. 중단(Ctrl-C)까지 큐를 소비한다."""
-    with session_factory() as session:
-        recovered = recover_in_flight(session)
-        if recovered:
-            logger.info("중단됐던 %d건을 재개 지점으로 되돌림", recovered)
-        if enricher is not None:
-            requeued = requeue_unenriched(session)
-            if requeued:
-                logger.info("요약 없는 완료 %d건을 엔리치먼트 재큐잉", requeued)
+    try:
+        with session_factory() as session:
+            recovered = recover_in_flight(session)
+            if recovered:
+                logger.info("중단됐던 %d건을 재개 지점으로 되돌림", recovered)
+            if enricher is not None:
+                requeued = requeue_unenriched(session)
+                if requeued:
+                    logger.info("요약 없는 완료 %d건을 엔리치먼트 재큐잉", requeued)
+    except Exception:  # noqa: BLE001 - DB가 아직 안 떴을 수 있다. 루프가 다시 시도한다
+        logger.exception("기동 정리 실패 — 루프에서 다시 시도")
     since_maintenance = 0
     while True:
         try:

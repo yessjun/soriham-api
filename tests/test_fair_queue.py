@@ -229,7 +229,7 @@ def test_요약을_시작하면_워크스페이스_잠금을_놓는다(engine, d
         끝난 뒤에 보면 마지막 커밋이 이미 잠금을 놓은 상태라 무엇을 시험하는지 모른다.
         """
 
-        def enrich(self, session, recording):
+        def enrich(self, session, recording, **_):
             with Session(engine) as b:
                 b.execute(text("set local lock_timeout = '2s'"))
                 도중에_집힌_것.append(claim_next(b))
@@ -250,7 +250,7 @@ def test_요약이_실패해도_도장은_남는다(engine, db, workspace, other
     from test_worker import FakeRunnerClient
 
     class 죽은엔리처:
-        def enrich(self, session, recording):
+        def enrich(self, session, recording, **_):
             raise RuntimeError("LLM down")
 
     waiting = add(db, other_workspace, "요약대기.wav", status="enriching")
@@ -290,7 +290,7 @@ def test_요약_중인_워커가_다른_워크스페이스를_붙잡고_있지_�
     도중에_집힌_것 = []
 
     class 도는동안_확인하는_엔리처:
-        def enrich(self, session, recording):
+        def enrich(self, session, recording, **_):
             # 요약이 도는 사이 1순위 워크스페이스에 새 녹음이 들어온다.
             # **워크스페이스 행을 쥐고 있으면 이 INSERT부터 막힌다** — 외래 키가
             # 그 행에 키 공유 잠금을 걸기 때문이다. 업로드가 통째로 멈춘다는 뜻이라

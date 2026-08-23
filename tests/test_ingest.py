@@ -212,3 +212,20 @@ def test_스캔은_도중에도_등록을_남긴다(db, tmp_path: Path, workspac
 
     assert max(seen) > 0, "스캔이 끝나기 전에 커밋된 등록이 하나도 없다"
     assert db.scalar(select(func.count()).select_from(Recording)) == 5
+
+
+def test_디스크가_통째로_안_보이면_유실로_찍지_않는다(db, tmp_path: Path, workspace):
+    """마운트가 풀린 자리는 빈 폴더로 남아 is_dir()가 참이다. 그대로 두면 마운트
+    사고 한 번에 그 워크스페이스의 스캔본 전량이 missing이 된다."""
+    base = tmp_path / "rec"
+    base.mkdir()
+    names = [f"{i}.wav" for i in range(ingest.SWEEP_BLACKOUT_MIN + 1)]
+    for name in names:
+        write_wav(base / name, name.encode())
+    ingest.scan(db, (base,), workspace_id=workspace.id)
+
+    for name in names:
+        (base / name).unlink()
+
+    assert ingest.scan(db, (base,), workspace_id=workspace.id)["missing"] == 0
+    assert db.scalar(select(func.count()).where(Recording.status == "missing")) == 0
