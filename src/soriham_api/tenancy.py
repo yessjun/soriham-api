@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from .auth import hash_password, new_token, token_hash
 from .models import (
+    WORKSPACE_ROLES,
     Invite,
     Recording,
     RecordingShare,
@@ -30,6 +31,11 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9-]+")
 
 INVITE_DEFAULT_DAYS = 14
+# 사람이 손으로 넣는 값이라 상한을 둔다. 무기한은 일수가 아니라 None으로 말한다
+INVITE_MAX_DAYS = 3650
+# 초대로는 소유자가 될 수 없다. 소유권 이전은 범위 밖이고, 허용하면 부분 유니크
+# 인덱스가 IntegrityError로 거절해 사용자에게 500으로 보인다
+INVITABLE_ROLES = tuple(r for r in WORKSPACE_ROLES if r != "owner")
 
 
 class WorkspaceNotFound(Exception):
@@ -42,6 +48,10 @@ class EmailTaken(Exception):
 
 class InviteInvalid(Exception):
     """초대가 없거나 만료·철회됐거나 다 쓰였다."""
+
+
+class MemberInvalid(Exception):
+    """구성원 변경이나 초대 발급을 할 수 없다. 메시지는 사용자에게 그대로 보여진다."""
 
 
 def normalize_email(raw: str) -> str:
@@ -371,7 +381,17 @@ def create_invite(
     expires_in_days: int | None = INVITE_DEFAULT_DAYS,
     max_uses: int = 1,
 ) -> IssuedInvite:
-    """구성원 초대. 원문 토큰은 여기서 한 번만 나온다."""
+    """구성원 초대. 원문 토큰은 여기서 한 번만 나온다.
+
+    입력 검증을 라우트가 아니라 여기서 한다. 라우트에만 두면 CLI 경로가 같은 값을
+    그대로 DB까지 내려보내고, 검사 제약이 터지며 500이 된다.
+    """
+    if role not in INVITABLE_ROLES:
+        raise MemberInvalid(f"초대 역할은 {', '.join(INVITABLE_ROLES)} 중 하나여야 합니다")
+    if expires_in_days is not None and not 1 <= expires_in_days <= INVITE_MAX_DAYS:
+        raise MemberInvalid(f"만료 기간은 1일에서 {INVITE_MAX_DAYS}일 사이여야 합니다")
+    if max_uses < 1:
+        raise MemberInvalid("사용 횟수는 1 이상이어야 합니다")
     raw = new_token()
     now = datetime.now(UTC)
     invite = Invite(
@@ -389,19 +409,12 @@ def create_invite(
 
 
 def accept_invite(session: Session, raw_token: str, user: User) -> Workspace:
-    """초대를 받아 구성원이 된다. 없거나 만료·철회·소진된 초대는 구분하지 않는다."""
-    invite = session.scalar(select(Invite).where(Invite.token_hash == token_hash(raw_token)))
-    now = datetime.now(UTC)
-    if (
-        invite is None
-        or invite.revoked_at is not None
-        or (invite.expires_at is not None and invite.expires_at <= now)
-        or invite.uses >= invite.max_uses
-    ):
-        raise InviteInvalid("초대가 유효하지 않습니다")
-    if invite.email is not None and invite.email != user.email:
-        raise InviteInvalid("초대가 유효하지 않습니다")
+    """초대를 받아 구성원이 된다. 없거나 만료·철회·소진된 초대는 구분하지 않는다.
 
+    미리보기와 같은 판정을 쓴다. 두 벌로 두면 한쪽만 고쳐지고, 실제로 미리보기가
+    이메일 검사를 빠뜨린 채 워크스페이스 이름을 내주고 있었다.
+    """
+    invite = peek_invite(session, raw_token, user)
     workspace = session.get(Workspace, invite.workspace_id)
     if workspace is None:
         raise InviteInvalid("초대가 유효하지 않습니다")
@@ -449,3 +462,135 @@ def bootstrap(
     user.default_workspace_id = workspace.id
     session.flush()
     return user, workspace, True
+
+
+def list_members(session: Session, workspace: Workspace) -> list[tuple[WorkspaceMember, User]]:
+    rows = session.execute(
+        select(WorkspaceMember, User)
+        .join(User, User.id == WorkspaceMember.user_id)
+        .where(WorkspaceMember.workspace_id == workspace.id)
+        .order_by(WorkspaceMember.id)
+    ).all()
+    return [(member, user) for member, user in rows]
+
+
+def find_member(session: Session, workspace: Workspace, user: User) -> WorkspaceMember | None:
+    return session.scalar(
+        select(WorkspaceMember).where(
+            WorkspaceMember.workspace_id == workspace.id,
+            WorkspaceMember.user_id == user.id,
+        )
+    )
+
+
+def set_member_role(
+    session: Session, workspace: Workspace, user: User, role: str
+) -> WorkspaceMember:
+    """역할을 바꾼다. 소유자는 이 길로 만들지도 없애지도 못한다.
+
+    소유권 이전은 범위 밖이다. 여기서 `owner`를 허용하면 부분 유니크 인덱스가
+    IntegrityError로 거절하는데, 그건 사용자에게 500으로 보인다.
+    """
+    if role not in WORKSPACE_ROLES:
+        raise MemberInvalid(f"역할은 {', '.join(WORKSPACE_ROLES)} 중 하나여야 합니다")
+    if role == "owner":
+        raise MemberInvalid("소유권 이전은 아직 지원하지 않습니다")
+    member = find_member(session, workspace, user)
+    if member is None:
+        raise MemberInvalid("이 워크스페이스의 구성원이 아닙니다")
+    if member.role == "owner":
+        raise MemberInvalid("소유자의 역할은 바꿀 수 없습니다")
+    member.role = role
+    session.flush()
+    return member
+
+
+def remove_member(session: Session, workspace: Workspace, user: User) -> None:
+    """구성원을 뺀다. 녹음은 워크스페이스 것이므로 그대로 남는다.
+
+    이 사람 앞으로 걸려 있던 초대는 함께 철회한다. 남겨 두면 방금 뺀 사람이 같은
+    토큰으로 다시 들어온다. 이메일을 지정하지 않은 초대는 건드리지 않는다 — 그건
+    특정인이 아니라 누구에게나 열어 둔 자리다.
+    """
+    member = find_member(session, workspace, user)
+    if member is None:
+        raise MemberInvalid("이 워크스페이스의 구성원이 아닙니다")
+    if member.role == "owner":
+        raise MemberInvalid("소유자는 뺄 수 없습니다")
+    session.delete(member)
+    now = datetime.now(UTC)
+    for invite in session.scalars(
+        select(Invite).where(
+            Invite.workspace_id == workspace.id,
+            Invite.email == user.email,
+            Invite.revoked_at.is_(None),
+        )
+    ):
+        invite.revoked_at = now
+    session.flush()
+    if user.default_workspace_id == workspace.id:
+        # 기본 워크스페이스가 없어진 사람이 로그인하면 콘솔이 어디로 갈지 모른다
+        user.default_workspace_id = session.scalar(
+            select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user.id)
+        )
+        session.flush()
+
+
+def list_invites(session: Session, workspace: Workspace) -> list[Invite]:
+    """살아있는 초대만. 철회·소진된 것은 화면에 남을 이유가 없다."""
+    now = datetime.now(UTC)
+    rows = session.scalars(
+        select(Invite)
+        .where(Invite.workspace_id == workspace.id, Invite.revoked_at.is_(None))
+        .order_by(Invite.id)
+    ).all()
+    return [
+        row
+        for row in rows
+        if row.uses < row.max_uses and (row.expires_at is None or row.expires_at > now)
+    ]
+
+
+def revoke_invite(session: Session, workspace: Workspace, public_id) -> bool:
+    """철회. 워크스페이스로 범위를 좁혀 찾는다 — 남의 초대 id로는 아무것도 못 지운다."""
+    invite = session.scalar(
+        select(Invite).where(
+            Invite.workspace_id == workspace.id,
+            Invite.public_id == public_id,
+            Invite.revoked_at.is_(None),
+        )
+    )
+    if invite is None:
+        return False
+    invite.revoked_at = datetime.now(UTC)
+    session.flush()
+    return True
+
+
+def peek_invite(
+    session: Session, raw_token: str, user: User, *, now: datetime | None = None
+) -> Invite:
+    """받는 사람 화면이 "어디로 부르는 초대인지"를 그리기 위한 조회.
+
+    **받을 사람을 `accept_invite`와 같은 규칙으로 검사한다.** 여기서 빠뜨리면 이메일을
+    지정한 초대의 요지("그 사람만")가 미리보기에서 무너진다 — 대상이 아닌 사람이
+    토큰만 쥐고 워크스페이스 이름을 얻는다. 수락은 막히는데 이름은 새는 상태다.
+    """
+    invite = _live_invite(session, raw_token, now=now)
+    if invite.email is not None and invite.email != user.email:
+        raise InviteInvalid("초대가 유효하지 않습니다")
+    return invite
+
+
+def _live_invite(session: Session, raw_token: str, *, now: datetime | None = None) -> Invite:
+    """없음·만료·철회·소진을 구분해서 알려주지 않는다."""
+    now = now or datetime.now(UTC)
+    invite = session.scalar(select(Invite).where(Invite.token_hash == token_hash(raw_token)))
+    if (
+        invite is None
+        or invite.revoked_at is not None
+        or (invite.expires_at is not None and invite.expires_at <= now)
+        or invite.uses >= invite.max_uses
+    ):
+        raise InviteInvalid("초대가 유효하지 않습니다")
+    return invite

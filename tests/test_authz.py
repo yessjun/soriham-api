@@ -96,6 +96,16 @@ def workspace_routes(workspace) -> list[tuple[str, str, dict]]:
         ("GET", f"{base}/tags", {}),
         ("GET", f"{base}/search?q=안녕", {}),
         ("GET", f"{base}/stats", {}),
+        ("GET", f"{base}/members", {}),
+        ("GET", f"{base}/invites", {}),
+        ("POST", f"{base}/invites", {"json": {}}),
+        (
+            "PUT",
+            f"{base}/members/00000000-0000-0000-0000-000000000001",
+            {"json": {"role": "member"}},
+        ),
+        ("DELETE", f"{base}/members/00000000-0000-0000-0000-000000000001", {}),
+        ("DELETE", f"{base}/invites/00000000-0000-0000-0000-000000000001", {}),
     ]
 
 
