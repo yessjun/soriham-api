@@ -19,6 +19,7 @@ from .auth import hash_password, new_token, token_hash
 from .models import (
     WORKSPACE_ROLES,
     Invite,
+    JobLog,
     Recording,
     RecordingShare,
     Tag,
@@ -287,7 +288,12 @@ def reject(session: Session, user: User, *, reviewer: User | None = None) -> Use
 
 
 def _drop_empty_personal_workspaces(session: Session, user: User) -> int:
-    """이 사람만 있고 녹음도 없는 개인 워크스페이스를 지운다."""
+    """이 사람만 있고 녹음도 처리 이력도 없는 개인 워크스페이스를 지운다.
+
+    처리 이력도 확인해야 한다. 이력은 workspace_id에 CASCADE로 걸려 있어서 워크스페이스를
+    지우면 같이 지워진다. 녹음만 보고 지우면 한도를 다 쓴 뒤 녹음 삭제 → 거절 → 재승인으로
+    사용량을 0으로 되돌릴 수 있다.
+    """
     workspace_ids = session.scalars(
         select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user.id)
     ).all()
@@ -304,7 +310,10 @@ def _drop_empty_personal_workspaces(session: Session, user: User) -> int:
         recordings = session.scalar(
             select(func.count(Recording.id)).where(Recording.workspace_id == workspace_id)
         )
-        if members == 1 and recordings == 0:
+        history = session.scalar(
+            select(func.count(JobLog.id)).where(JobLog.workspace_id == workspace_id)
+        )
+        if members == 1 and recordings == 0 and history == 0:
             if user.default_workspace_id == workspace_id:
                 user.default_workspace_id = None
             session.execute(delete(Workspace).where(Workspace.id == workspace_id))
