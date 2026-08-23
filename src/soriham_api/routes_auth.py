@@ -140,6 +140,7 @@ def register(app: FastAPI, deps: Deps) -> None:
         request: Request,
         response: Response,
         session: Session = Depends(deps.db),
+        _: None = Depends(deps.require_known_origin),
     ) -> MeOut:
         if not body.password.strip():
             raise HTTPException(422, "비밀번호가 비어 있습니다")
@@ -183,6 +184,7 @@ def register(app: FastAPI, deps: Deps) -> None:
         request: Request,
         response: Response,
         session: Session = Depends(deps.db),
+        _: None = Depends(deps.require_known_origin),
     ) -> MeOut:
         ip = request.client.host if request.client else None
         src = source_key("login", ip)

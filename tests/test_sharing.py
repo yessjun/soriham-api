@@ -612,3 +612,23 @@ def test_처리_중이면_처리_중이라고만_말한다(client, guest, db, mi
     db.commit()
 
     assert guest.get(f"/api/shared/{token}").json()["status"] == "processing"
+
+
+def test_너무_짧은_링크_비밀번호는_받지_않는다(client, mine):
+    """잠금 해제는 출처와 링크의 짝으로 센다. IP를 바꿔 가며 두드리면 제한을 우회한다."""
+    resp = client.post(f"/api/recordings/{mine.public_id}/links", json={"password": "1234"})
+
+    assert resp.status_code == 422
+    assert "6자" in resp.json()["detail"]
+
+
+def test_남의_페이지에서_보낸_잠금_해제는_거절한다(client, guest, mine):
+    token = make_link(client, mine, password=LINK_PASSWORD)["token"]
+
+    resp = guest.post(
+        f"/api/shared/{token}/unlock",
+        json={"password": LINK_PASSWORD},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403

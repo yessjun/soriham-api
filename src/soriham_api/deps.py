@@ -55,6 +55,7 @@ class Deps:
     require_user: Callable[..., User]
     require_active: Callable[..., User]
     require_csrf: Callable[..., None]
+    require_known_origin: Callable[..., None]
     workspace_ctx: Callable[..., WorkspaceContext]
     recording_at: Callable[[Perm], Callable[..., Recording]]
     require_service_admin: Callable[..., User]
@@ -108,6 +109,19 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
         if not user.is_service_admin:
             raise HTTPException(404, "찾을 수 없습니다")
         return user
+
+    def require_known_origin(request: Request) -> None:
+        """세션이 생기기 전에 도는 요청을 위한 검사.
+
+        로그인과 가입은 아직 CSRF 토큰이 없어서 그 검사를 쓸 수 없다. 그러면 남의
+        페이지가 폼을 자동 제출해 피해자 브라우저를 공격자 계정으로 로그인시킬 수 있다.
+
+        Origin이 없는 요청은 통과시킨다. 브라우저는 이 요청에 Origin을 반드시 싣고,
+        안 싣는 쪽은 curl이나 CLI다.
+        """
+        origin = request.headers.get("origin")
+        if origin and origin not in cfg.cors_origins:
+            raise HTTPException(403, "허용되지 않은 곳에서 온 요청입니다")
 
     def require_csrf(request: Request, user: User = Depends(require_user)) -> None:
         """쿠키가 자동으로 실리는 만큼 교차 사이트 요청을 한 겹 더 막는다."""
@@ -208,6 +222,7 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
         require_user=require_user,
         require_active=require_active,
         require_csrf=require_csrf,
+        require_known_origin=require_known_origin,
         workspace_ctx=workspace_ctx,
         recording_at=recording_at,
         require_service_admin=require_service_admin,
