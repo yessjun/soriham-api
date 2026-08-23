@@ -134,6 +134,10 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
                 # 같은 답이라 탐침이 되지 않고, 세션이 만료된 사람이 로그인 화면으로
                 # 돌아갈 수 있다 — 404를 주면 콘솔은 없는 녹음이라고 표시한다
                 raise HTTPException(401, "로그인이 필요합니다")
+            # 조회보다 먼저 본다. 뒤에 두면 대기 중인 사람이 있는 id에는 403을,
+            # 없는 id에는 404를 받아 존재가 드러난다
+            if _blocked_account(session, principal):
+                raise HTTPException(403, "관리자 승인 대기 중입니다")
             recording = session.scalar(
                 select(Recording)
                 .where(Recording.public_id == public_id)
@@ -145,8 +149,6 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
             )
             if recording is None:
                 raise HTTPException(404, "녹음이 없습니다")
-            if _blocked_account(session, principal):
-                raise HTTPException(403, "관리자 승인 대기 중입니다")
             if resolve_recording_perm(session, principal, recording) < need:
                 # 403이면 그 녹음이 있다고 알려주는 셈이라 public_id 공간이
                 # 멤버십 탐침이 된다

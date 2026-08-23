@@ -17,7 +17,7 @@ from conftest import TEST_PASSWORD, login, make_settings
 from soriham_api import auth
 from soriham_api.app import create_app
 from soriham_api.ingest import scan
-from soriham_api.models import Recording
+from soriham_api.models import Recording, Workspace
 from soriham_api.tenancy import add_member, create_user
 from soriham_api.worker import process_one
 from test_worker import FakeRunnerClient
@@ -280,3 +280,85 @@ def test_운영_모드에서는_스키마를_열지_않는다(engine):
         )
     )
     assert opened.get("/openapi.json").status_code == 200
+
+
+def test_통계는_남의_워크스페이스_녹음을_세지_않는다(
+    app_client, db, mine, other_workspace, stranger
+):
+    """라우트를 관리자로 막아도 질의 안쪽 범위를 안 걸면 그대로 샌다.
+
+    최근 에러가 녹음 제목을 나열하므로, 범위가 없으면 남의 회의 제목이 그대로 보인다.
+    """
+    mine.status = "error"
+    mine.error = "일부러 낸 실패"
+    db.commit()
+
+    login(app_client, stranger.email)
+    body = app_client.get(f"/api/workspaces/{other_workspace.public_id}/stats").json()
+
+    assert body["recent_errors"] == []
+    assert sum(row["count"] for row in body["by_status"]) == 0
+
+
+def test_목록은_자기_워크스페이스만_보여준다(app_client, db, mine, other_workspace, owner):
+    """가장 중요한 필터인데 지워도 아무 테스트가 울지 않았다."""
+    theirs = Recording(
+        workspace_id=other_workspace.id,
+        source="upload",
+        path="/tmp/theirs/b.wav",
+        filename="theirs.wav",
+        size_bytes=10,
+        partial_hash="theirs",
+        status="done",
+    )
+    db.add(theirs)
+    db.commit()
+
+    login(app_client, owner.email)
+    ws = db.get(Workspace, mine.workspace_id)
+    body = app_client.get(f"/api/workspaces/{ws.public_id}/recordings").json()
+
+    assert body["total"] == 1
+    names = {item["filename"] for item in body["items"]}
+    assert "theirs.wav" not in names
+
+
+def test_검색도_자기_워크스페이스만_찾는다(app_client, db, mine, other_workspace, owner):
+    theirs = Recording(
+        workspace_id=other_workspace.id,
+        source="upload",
+        path="/tmp/theirs/c.wav",
+        filename="20260817_findme.wav",
+        size_bytes=10,
+        partial_hash="theirs-c",
+        status="done",
+        title="남의 회의",
+    )
+    db.add(theirs)
+    db.commit()
+    ws = db.get(Workspace, mine.workspace_id)
+
+    login(app_client, owner.email)
+    hits = app_client.get(
+        f"/api/workspaces/{ws.public_id}/search", params={"q": "20260817"}
+    ).json()["hits"]
+    assert all(h["recording"]["filename"] != "20260817_findme.wav" for h in hits)
+
+
+def test_승인_대기_중에는_있는_것과_없는_것이_같은_답이다(app_client, db, workspace, mine):
+    """계정 상태 검사가 조회 뒤에 있으면 403과 404가 갈려 존재가 드러난다."""
+    pending = create_user(
+        db,
+        email="pending@example.com",
+        password_hash=auth.hash_password(TEST_PASSWORD),
+        display_name="대기",
+        status="pending",
+    )
+    add_member(db, workspace, pending, "member")
+    db.commit()
+
+    login(app_client, pending.email)
+    real = app_client.get(f"/api/recordings/{mine.public_id}")
+    fake = app_client.get("/api/recordings/00000000-0000-0000-0000-000000000000")
+    assert real.status_code == fake.status_code == 403
+    assert real.json()["detail"] == fake.json()["detail"]

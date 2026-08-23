@@ -182,7 +182,10 @@ def register(app: FastAPI, deps: Deps) -> None:
 
     @app.post("/api/auth/logout", status_code=204)
     def logout_route(
-        request: Request, response: Response, session: Session = Depends(deps.db)
+        request: Request,
+        response: Response,
+        session: Session = Depends(deps.db),
+        _: None = Depends(deps.require_csrf),
     ) -> Response:
         raw = request.cookies.get(cfg.cookie_name)
         if raw:

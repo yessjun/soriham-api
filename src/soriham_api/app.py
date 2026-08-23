@@ -376,12 +376,15 @@ def create_app(
             # 처리 파이프라인 뷰다. 최근 에러가 녹음 제목을 나열하므로 구성원 전체에게
             # 열면 받지 않은 녹음의 제목이 보인다
             raise HTTPException(403, "이 화면은 워크스페이스 관리자만 볼 수 있습니다")
+        ws = ctx.workspace.id
         rows = session.execute(
             select(
                 Recording.status,
                 func.count(),
                 func.coalesce(func.sum(Recording.duration_sec), 0.0),
-            ).group_by(Recording.status)
+            )
+            .where(Recording.workspace_id == ws)
+            .group_by(Recording.status)
         ).all()
         by_status = [StatusCount(status=s, count=c, audio_sec=float(a)) for s, c, a in rows]
         total_audio = sum(x.audio_sec for x in by_status if x.status != "duplicate")
@@ -391,6 +394,7 @@ def create_app(
         recent = session.execute(
             select(JobLog.audio_sec, JobLog.elapsed_sec)
             .where(
+                JobLog.workspace_id == ws,
                 JobLog.stage == "transcribe",
                 JobLog.status == "done",
                 JobLog.audio_sec.is_not(None),
@@ -413,7 +417,7 @@ def create_app(
         recent_errors = session.scalars(
             select(Recording)
             .options(selectinload(Recording.tags))
-            .where(Recording.status == "error")
+            .where(Recording.workspace_id == ws, Recording.status == "error")
             .order_by(Recording.updated_at.desc())
             .limit(10)
         ).all()
