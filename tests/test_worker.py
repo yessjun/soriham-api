@@ -52,24 +52,24 @@ class FakeRunnerClient:
         return self.result
 
 
-def register(db, tmp_path: Path, names: list[str]) -> list[Recording]:
+def register(db, tmp_path: Path, names: list[str], workspace) -> list[Recording]:
     for name in names:
         p = tmp_path / "rec" / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(name.encode())
-    scan(db, (tmp_path / "rec",))
+    scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
     return db.scalars(select(Recording).order_by(Recording.id)).all()
 
 
-def test_claim_prefers_latest_recording(db, tmp_path: Path):
-    register(db, tmp_path, ["20260101_000000.wav", "20260817_000000.wav"])
+def test_claim_prefers_latest_recording(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["20260101_000000.wav", "20260817_000000.wav"], workspace)
     claimed = claim_next(db)
     assert claimed is not None
     assert claimed.filename == "20260817_000000.wav"
 
 
-def test_process_one_saves_segments_and_logs(db, tmp_path: Path):
-    register(db, tmp_path, ["a.wav"])
+def test_process_one_saves_segments_and_logs(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["a.wav"], workspace)
     runner = FakeRunnerClient()
 
     assert process_one(db, runner) is True
@@ -88,8 +88,8 @@ def test_process_one_saves_segments_and_logs(db, tmp_path: Path):
     assert process_one(db, runner) is False
 
 
-def test_process_one_replaces_segments_on_rerun(db, tmp_path: Path):
-    register(db, tmp_path, ["a.wav"])
+def test_process_one_replaces_segments_on_rerun(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["a.wav"], workspace)
     process_one(db, FakeRunnerClient())
     row = db.scalars(select(Recording)).one()
     row.status = "pending"
@@ -100,8 +100,8 @@ def test_process_one_replaces_segments_on_rerun(db, tmp_path: Path):
     assert len(segments) == 2  # 중복 누적 없이 교체
 
 
-def test_process_one_isolates_error_and_continues(db, tmp_path: Path):
-    register(db, tmp_path, ["20260101_000000.wav", "20260817_000000.wav"])
+def test_process_one_isolates_error_and_continues(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["20260101_000000.wav", "20260817_000000.wav"], workspace)
     failing = FakeRunnerClient(error=RuntimeError("러너 다운"))
 
     assert process_one(db, failing) is True
@@ -114,8 +114,8 @@ def test_process_one_isolates_error_and_continues(db, tmp_path: Path):
     assert db.scalars(select(Recording).where(Recording.status == "done")).one() is not None
 
 
-def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path):
-    rows = register(db, tmp_path, ["a.wav", "b.wav"])
+def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path, workspace):
+    rows = register(db, tmp_path, ["a.wav", "b.wav"], workspace)
     rows[0].status = "transcribing"  # 세그먼트 없음 -> pending
     rows[1].status = "enriching"
     rows[1].segments.append(Segment(idx=0, start_sec=0, end_sec=1, text="x"))
@@ -128,8 +128,8 @@ def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path):
     assert rows[1].status == "enriching"
 
 
-def test_enriching_recording_skips_transcribe(db, tmp_path: Path):
-    register(db, tmp_path, ["a.wav"])
+def test_enriching_recording_skips_transcribe(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["a.wav"], workspace)
     runner = FakeRunnerClient()
     process_one(db, runner)
     row = db.scalars(select(Recording)).one()
@@ -142,8 +142,8 @@ def test_enriching_recording_skips_transcribe(db, tmp_path: Path):
     assert len(runner.calls) == 1  # 전사는 다시 돌지 않음
 
 
-def test_전사_진행률이_저장되고_완료_시_정리된다(db, tmp_path: Path) -> None:
-    [recording] = register(db, tmp_path, ["20260818_120000.wav"])
+def test_전사_진행률이_저장되고_완료_시_정리된다(db, tmp_path: Path, workspace) -> None:
+    [recording] = register(db, tmp_path, ["20260818_120000.wav"], workspace)
     runner = FakeRunnerClient(progress=(0.2, 0.5, 0.9))
 
     process_one(db, runner, model=None, language=None, enricher=None)
@@ -155,9 +155,9 @@ def test_전사_진행률이_저장되고_완료_시_정리된다(db, tmp_path: 
     assert recording.stage_started_at is None
 
 
-def test_진행률이_1퍼센트포인트_미만이면_쓰지_않는다(db, tmp_path: Path) -> None:
+def test_진행률이_1퍼센트포인트_미만이면_쓰지_않는다(db, tmp_path: Path, workspace) -> None:
     """3초 폴링마다 커밋하지 않기 위한 임계값."""
-    [recording] = register(db, tmp_path, ["20260818_130000.wav"])
+    [recording] = register(db, tmp_path, ["20260818_130000.wav"], workspace)
     commits: list[float | None] = []
 
     runner = FakeRunnerClient(progress=(0.30, 0.302, 0.35))
@@ -179,8 +179,8 @@ def test_진행률이_1퍼센트포인트_미만이면_쓰지_않는다(db, tmp_
     assert 0.35 in commits
 
 
-def test_전사_실패하면_진행_정보를_정리한다(db, tmp_path: Path) -> None:
-    [recording] = register(db, tmp_path, ["20260818_140000.wav"])
+def test_전사_실패하면_진행_정보를_정리한다(db, tmp_path: Path, workspace) -> None:
+    [recording] = register(db, tmp_path, ["20260818_140000.wav"], workspace)
     runner = FakeRunnerClient(error=RuntimeError("러너 실패"), progress=(0.4,))
 
     process_one(db, runner, model=None, language=None, enricher=None)
@@ -191,9 +191,9 @@ def test_전사_실패하면_진행_정보를_정리한다(db, tmp_path: Path) -
     assert recording.stage_started_at is None
 
 
-def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path) -> None:
+def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path, workspace) -> None:
     """마지막 퍼센트를 그대로 두면 그 값에 멈춘 것처럼 보인다."""
-    [recording] = register(db, tmp_path, ["20260818_180000.wav"])
+    [recording] = register(db, tmp_path, ["20260818_180000.wav"], workspace)
     seen: list[float | None] = []
 
     class StageRunner(FakeRunnerClient):
@@ -212,9 +212,9 @@ def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path)
     assert seen == [0.6, None]
 
 
-def test_화자분리_실패는_화면에_남는다(db, tmp_path: Path) -> None:
+def test_화자분리_실패는_화면에_남는다(db, tmp_path: Path, workspace) -> None:
     """녹취록은 살리되 조용히 넘기지 않는다. 엔리치먼트가 성공해도 지워지지 않는다."""
-    [recording] = register(db, tmp_path, ["20260818_190000.wav"])
+    [recording] = register(db, tmp_path, ["20260818_190000.wav"], workspace)
     result = dict(RESULT)
     result["meta"] = {"diarized": False, "diarize_error": "RuntimeError: 디코더 실패"}
 
@@ -231,8 +231,8 @@ def test_화자분리_실패는_화면에_남는다(db, tmp_path: Path) -> None:
     assert "디코더 실패" in recording.error
 
 
-def test_소음_세그먼트는_요약에_들어가지_않는다(db, tmp_path: Path) -> None:
-    [recording] = register(db, tmp_path, ["20260818_200000.wav"])
+def test_소음_세그먼트는_요약에_들어가지_않는다(db, tmp_path: Path, workspace) -> None:
+    [recording] = register(db, tmp_path, ["20260818_200000.wav"], workspace)
     result = dict(RESULT)
     result["segments"] = [
         {"start": 0.0, "end": 1.0, "text": "실제 발언", "speaker": None, "kind": "speech"},

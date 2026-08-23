@@ -12,10 +12,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from soriham_api.models import Recording, Tag
+from soriham_api.models import Recording
+from soriham_api.tenancy import resolve_tag
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +128,7 @@ class LlmEnricher:
             recording.title = result.title
         recording.summary = result.summary or recording.summary
         for name in result.tags:
-            tag = session.scalar(select(Tag).where(Tag.name == name))
-            if tag is None:
-                tag = Tag(name=name)
-                session.add(tag)
-                session.flush()
+            tag = resolve_tag(session, recording.workspace_id, name)
             if tag not in recording.tags:
                 recording.tags.append(tag)
 

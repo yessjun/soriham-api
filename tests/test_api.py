@@ -28,6 +28,7 @@ def client(engine, db, tmp_path: Path):
         cors_origins=("http://localhost:5174",),
         upload_dir=None,
         max_upload_bytes=4 * 1024 * 1024 * 1024,
+        default_workspace=None,
         enrich_backend="off",
         ollama_url="http://localhost:11434",
         ollama_model="qwen3:8b",
@@ -36,17 +37,17 @@ def client(engine, db, tmp_path: Path):
     return TestClient(app)
 
 
-def make_recording(db, tmp_path: Path, name: str = "20260817_100000.wav") -> Recording:
+def make_recording(db, tmp_path: Path, workspace, name: str = "20260817_100000.wav") -> Recording:
     p = tmp_path / "rec" / name
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"RIFF" + name.encode() + b"\x00" * 64)
-    scan(db, (tmp_path / "rec",))
+    scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
     process_one(db, FakeRunnerClient())
     return db.scalars(select(Recording).where(Recording.filename == name)).one()
 
 
-def test_list_and_detail(client, db, tmp_path: Path):
-    rec = make_recording(db, tmp_path)
+def test_list_and_detail(client, db, tmp_path: Path, workspace):
+    rec = make_recording(db, tmp_path, workspace)
 
     body = client.get("/api/recordings").json()
     assert body["total"] == 1
@@ -66,8 +67,8 @@ def test_detail_404_for_unknown_uuid(client):
     assert client.get("/api/recordings/123").status_code == 422  # 정수 내부 id 거부
 
 
-def test_speaker_rename_roundtrip(client, db, tmp_path: Path):
-    rec = make_recording(db, tmp_path)
+def test_speaker_rename_roundtrip(client, db, tmp_path: Path, workspace):
+    rec = make_recording(db, tmp_path, workspace)
     resp = client.put(
         f"/api/recordings/{rec.public_id}/speakers/SPEAKER_00", json={"name": "김소리"}
     )
@@ -80,9 +81,9 @@ def test_speaker_rename_roundtrip(client, db, tmp_path: Path):
     assert detail["speaker_names"] == {"SPEAKER_00": "박소리"}
 
 
-def test_tags_attach_and_filter(client, db, tmp_path: Path):
-    rec = make_recording(db, tmp_path)
-    other = make_recording(db, tmp_path, "20260816_090000.wav")
+def test_tags_attach_and_filter(client, db, tmp_path: Path, workspace):
+    rec = make_recording(db, tmp_path, workspace)
+    other = make_recording(db, tmp_path, workspace, "20260816_090000.wav")
 
     tags = client.post(f"/api/recordings/{rec.public_id}/tags", json={"name": "주간회의"}).json()
     assert [t["name"] for t in tags] == ["주간회의"]
@@ -100,8 +101,8 @@ def test_tags_attach_and_filter(client, db, tmp_path: Path):
     assert filtered["total"] == 1
 
 
-def test_search_returns_segment_hits(client, db, tmp_path: Path):
-    rec = make_recording(db, tmp_path)
+def test_search_returns_segment_hits(client, db, tmp_path: Path, workspace):
+    rec = make_recording(db, tmp_path, workspace)
 
     hits = client.get("/api/search", params={"q": "안녕"}).json()["hits"]
     assert len(hits) == 1
@@ -116,9 +117,9 @@ def test_search_returns_segment_hits(client, db, tmp_path: Path):
     assert client.get("/api/search", params={"q": "없는말"}).json()["hits"] == []
 
 
-def test_list_q_filter_matches_segment_text(client, db, tmp_path: Path):
-    make_recording(db, tmp_path)
-    make_recording(db, tmp_path, "20260101_000000.wav")
+def test_list_q_filter_matches_segment_text(client, db, tmp_path: Path, workspace):
+    make_recording(db, tmp_path, workspace)
+    make_recording(db, tmp_path, workspace, "20260101_000000.wav")
 
     body = client.get("/api/recordings", params={"q": "반갑"}).json()
     assert body["total"] == 2  # 두 녹음 모두 같은 가짜 전사 결과
@@ -127,8 +128,8 @@ def test_list_q_filter_matches_segment_text(client, db, tmp_path: Path):
     assert body["total"] == 1
 
 
-def test_audio_range_streaming(client, db, tmp_path: Path):
-    rec = make_recording(db, tmp_path)
+def test_audio_range_streaming(client, db, tmp_path: Path, workspace):
+    rec = make_recording(db, tmp_path, workspace)
     content = Path(rec.path).read_bytes()
 
     full = client.get(f"/api/recordings/{rec.public_id}/audio")
@@ -149,19 +150,19 @@ def test_audio_range_streaming(client, db, tmp_path: Path):
     assert bad.status_code == 416
 
 
-def test_audio_missing_file_404(client, db, tmp_path: Path):
-    rec = make_recording(db, tmp_path)
+def test_audio_missing_file_404(client, db, tmp_path: Path, workspace):
+    rec = make_recording(db, tmp_path, workspace)
     Path(rec.path).unlink()
     assert client.get(f"/api/recordings/{rec.public_id}/audio").status_code == 404
 
 
-def test_stats(client, db, tmp_path: Path):
-    make_recording(db, tmp_path)
+def test_stats(client, db, tmp_path: Path, workspace):
+    make_recording(db, tmp_path, workspace)
     # 실측 로그 기반 배속·ETA
     log = db.scalars(select(JobLog)).one()
     log.audio_sec = 10.0
     log.elapsed_sec = 2.0
-    rec2 = make_recording(db, tmp_path, "20260816_090000.wav")
+    rec2 = make_recording(db, tmp_path, workspace, "20260816_090000.wav")
     rec2.status = "error"
     rec2.error = "stt: 러너 다운"
     db.commit()
@@ -173,8 +174,8 @@ def test_stats(client, db, tmp_path: Path):
     assert body["recent_errors"][0]["id"] == str(rec2.public_id)
 
 
-def test_진행률과_남은_시간이_응답에_실린다(client, db, tmp_path: Path) -> None:
-    recording = make_recording(db, tmp_path, "20260818_150000.wav")
+def test_진행률과_남은_시간이_응답에_실린다(client, db, tmp_path: Path, workspace) -> None:
+    recording = make_recording(db, tmp_path, workspace, "20260818_150000.wav")
     recording.status = "transcribing"
     recording.progress = 0.25
     recording.stage_started_at = datetime.now(UTC) - timedelta(seconds=60)
@@ -187,8 +188,8 @@ def test_진행률과_남은_시간이_응답에_실린다(client, db, tmp_path:
     assert 170 < body["eta_sec"] < 190
 
 
-def test_진행률이_없으면_남은_시간도_없다(client, db, tmp_path: Path) -> None:
-    recording = make_recording(db, tmp_path, "20260818_160000.wav")
+def test_진행률이_없으면_남은_시간도_없다(client, db, tmp_path: Path, workspace) -> None:
+    recording = make_recording(db, tmp_path, workspace, "20260818_160000.wav")
 
     body = client.get(f"/api/recordings/{recording.public_id}").json()
 
@@ -196,9 +197,9 @@ def test_진행률이_없으면_남은_시간도_없다(client, db, tmp_path: Pa
     assert body["eta_sec"] is None
 
 
-def test_진행률이_0이면_남은_시간을_추정하지_않는다(client, db, tmp_path: Path) -> None:
+def test_진행률이_0이면_남은_시간을_추정하지_않는다(client, db, tmp_path: Path, workspace) -> None:
     """0으로 나누지 않고, 근거 없는 추정을 내놓지도 않는다."""
-    recording = make_recording(db, tmp_path, "20260818_170000.wav")
+    recording = make_recording(db, tmp_path, workspace, "20260818_170000.wav")
     recording.status = "transcribing"
     recording.progress = 0.0
     recording.stage_started_at = datetime.now(UTC) - timedelta(seconds=30)

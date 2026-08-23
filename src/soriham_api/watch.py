@@ -35,8 +35,9 @@ def wait_until_stable(path: Path) -> bool:
 
 
 class _Handler(FileSystemEventHandler):
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(self, session_factory: sessionmaker[Session], workspace_id: int) -> None:
         self._session_factory = session_factory
+        self._workspace_id = workspace_id
 
     def on_created(self, event: FileSystemEvent) -> None:
         self._maybe_ingest(event)
@@ -54,16 +55,18 @@ class _Handler(FileSystemEventHandler):
             logger.warning("파일 크기가 안정되지 않아 건너뜀: %s", path)
             return
         with self._session_factory() as session:
-            created = ingest_file(session, path)
+            created = ingest_file(session, path, workspace_id=self._workspace_id)
             session.commit()
         if created is not None:
             logger.info("감시 등록: %s (%s)", path.name, created.status)
 
 
-def watch(session_factory: sessionmaker[Session], dirs: tuple[Path, ...]) -> None:
+def watch(
+    session_factory: sessionmaker[Session], dirs: tuple[Path, ...], *, workspace_id: int
+) -> None:
     """감시를 시작하고 중단(Ctrl-C)까지 블로킹한다."""
     observer = Observer()
-    handler = _Handler(session_factory)
+    handler = _Handler(session_factory, workspace_id)
     for d in dirs:
         if d.is_dir():
             observer.schedule(handler, str(d), recursive=True)

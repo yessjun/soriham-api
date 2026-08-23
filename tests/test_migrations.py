@@ -1,13 +1,16 @@
 """마이그레이션이 만든 실제 스키마와 모델 선언이 어긋나지 않는지 본다.
 
 `compare_metadata`가 테이블·컬럼·타입·FK·인덱스(표현식과 정렬 방향 포함)를 덮지만
-**보지 않는 것이 둘 있고**, 그 둘이 하필 이 스키마의 급소라 검사를 따로 둔다:
+**보지 않는 것이 셋 있고**, 셋 다 하필 이 스키마의 급소라 검사를 따로 둔다:
 
 - **CHECK 제약** — 상태머신 값이 여기 산다. 모델에 상태를 추가하고 마이그레이션을
   빠뜨리면 그 상태를 쓰는 순간까지 아무도 모른다.
 - **인덱스 접근 방식과 연산자 클래스** — 한국어 부분 문자열 검색은 `gin` + `gin_trgm_ops`에
   전적으로 기대는데, 이게 조용히 btree로 바뀌어도 `compare_metadata`는 차이를 내지 않는다.
   검색이 느려질 뿐 결과는 나오므로 테스트도 화면도 멀쩡해 보인다.
+- **부분 인덱스의 WHERE 술어** — 술어가 사라져도 차이를 내지 않는다. 워크스페이스마다
+  소유자가 하나임을 강제하는 것이 이 술어라, 없어지면 강제가 풀리거나(술어만 빠지면)
+  구성원이 워크스페이스당 한 명으로 잘못 잠긴다.
 """
 
 from __future__ import annotations
@@ -48,6 +51,31 @@ def test_한국어_검색_인덱스가_trigram_gin이다(engine):
         assert definition is not None, f"{name} 인덱스가 DB에 없다"
         assert "USING gin" in definition, f"{name}이 gin이 아니다: {definition}"
         assert "gin_trgm_ops" in definition, f"{name}에 trigram 연산자 클래스가 없다: {definition}"
+
+
+# (인덱스 이름, WHERE 술어에 반드시 들어가야 하는 조각)
+PARTIAL_INDEX_PREDICATES = (
+    ("uq_workspace_members_single_owner", "role = 'owner'"),
+    ("uq_recording_shares_user", "user_id IS NOT NULL"),
+    ("uq_recording_shares_email", "invite_email IS NOT NULL"),
+)
+
+
+def test_부분_인덱스의_술어가_살아있다(engine):
+    """`compare_metadata`가 못 보는 자리. 술어가 사라져도 인덱스는 남아 있어서
+    스키마 비교로는 멀쩡해 보이고, 강제하던 규칙만 조용히 바뀐다."""
+    with engine.connect() as conn:
+        rows = dict(
+            conn.execute(
+                text("select indexname, indexdef from pg_indexes where indexname = any(:names)"),
+                {"names": [name for name, _ in PARTIAL_INDEX_PREDICATES]},
+            ).all()
+        )
+    for name, predicate in PARTIAL_INDEX_PREDICATES:
+        definition = rows.get(name)
+        assert definition is not None, f"{name} 인덱스가 DB에 없다"
+        assert "WHERE" in definition.upper(), f"{name}이 부분 인덱스가 아니다: {definition}"
+        assert predicate in definition, f"{name}의 술어가 다르다: {definition}"
 
 
 def test_드리프트_검사가_실제로_차이를_잡는다(engine):
