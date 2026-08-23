@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -404,3 +405,69 @@ def test_행이_위조돼도_남의_파일은_내보내지_않는다(app_client,
     missing = app_client.get(f"/api/recordings/{mine.public_id}/audio")
     assert missing.status_code == 404
     assert forged.json()["detail"] == missing.json()["detail"]
+
+
+def test_남은_시간은_자기_대기분만_센다(app_client, db, mine, other_workspace, owner):
+    """전역으로 세면 남의 작업량이 그대로 드러난다."""
+    from soriham_api.models import JobLog, Workspace
+
+    ws = db.get(Workspace, mine.workspace_id)
+    mine.status = "pending"
+    mine.duration_sec = 600.0
+    theirs = Recording(
+        workspace_id=other_workspace.id,
+        source="upload",
+        path="/tmp/theirs/big.wav",
+        filename="big.wav",
+        size_bytes=10,
+        partial_hash="theirs-big",
+        status="pending",
+        duration_sec=36000.0,
+    )
+    db.add(theirs)
+    db.add(
+        JobLog(
+            workspace_id=ws.id,
+            stage="transcribe",
+            status="done",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            audio_sec=100.0,
+            elapsed_sec=10.0,
+        )
+    )
+    db.commit()
+
+    login(app_client, owner.email)
+    body = app_client.get(f"/api/workspaces/{ws.public_id}/stats").json()
+
+    assert body["speed_ratio"] == pytest.approx(0.1)
+    # 자기 것 600초만 센다. 남의 10시간이 섞이면 3660이 나온다
+    assert body["eta_sec"] == pytest.approx(60.0)
+
+
+def test_처리_배속은_남의_실측으로도_낸다(app_client, db, mine, other_workspace, owner):
+    """배속은 이 기계의 특성이다. 나누면 새 워크스페이스가 남은 시간을 아예 못 낸다."""
+    from soriham_api.models import JobLog, Workspace
+
+    ws = db.get(Workspace, mine.workspace_id)
+    mine.status = "pending"
+    mine.duration_sec = 600.0
+    db.add(
+        JobLog(
+            workspace_id=other_workspace.id,
+            stage="transcribe",
+            status="done",
+            started_at=datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            audio_sec=100.0,
+            elapsed_sec=20.0,
+        )
+    )
+    db.commit()
+
+    login(app_client, owner.email)
+    body = app_client.get(f"/api/workspaces/{ws.public_id}/stats").json()
+
+    assert body["speed_ratio"] == pytest.approx(0.2)
+    assert body["eta_sec"] == pytest.approx(120.0)
