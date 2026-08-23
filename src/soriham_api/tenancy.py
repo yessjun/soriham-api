@@ -55,9 +55,27 @@ class MemberInvalid(Exception):
     """구성원 변경이나 초대 발급을 할 수 없다. 메시지는 사용자에게 그대로 보여진다."""
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 def normalize_email(raw: str) -> str:
-    """비교와 저장에 쓰는 단일 형태. 스키마의 lower() CHECK가 이 함수를 강제한다."""
+    """비교와 저장에 쓰는 단일 형태. 스키마의 lower() CHECK가 이 함수를 강제한다.
+
+    조회에도 쓰이므로 형식은 보지 않는다. 계정이나 초대를 만들 때는 valid_email을 쓴다.
+    """
     return raw.strip().lower()
+
+
+def valid_email(raw: str) -> str:
+    """새로 저장할 이메일. 형식이 아니면 거절한다.
+
+    가입은 형식을 안 보고 공유만 보고 있어서, @ 없는 주소로 가입한 실존 계정에
+    공유하면 422가 나는 조합이 있었다.
+    """
+    email = normalize_email(raw)
+    if not _EMAIL_RE.match(email):
+        raise MemberInvalid(f"이메일 주소가 올바르지 않습니다: {raw.strip()}")
+    return email
 
 
 def validate_slug(slug: str) -> str:
@@ -190,7 +208,7 @@ def signup(
     한도는 호출자가 설정에서 읽어 넘긴다. 여기서 기본값을 비워 두면 승인이 곧
     무제한이 되어 한도 장치 전체가 아무도 막지 않는다.
     """
-    normalized = normalize_email(email)
+    normalized = valid_email(email)
     if find_user(session, normalized) is not None:
         raise EmailTaken(f"이미 가입된 이메일입니다: {normalized}")
 
@@ -405,7 +423,7 @@ def create_invite(
     now = datetime.now(UTC)
     invite = Invite(
         token_hash=token_hash(raw),
-        email=normalize_email(email) if email else None,
+        email=valid_email(email) if email else None,
         workspace_id=workspace.id,
         role=role,
         created_by_user_id=created_by.id if created_by is not None else None,
@@ -603,3 +621,49 @@ def _live_invite(session: Session, raw_token: str, *, now: datetime | None = Non
     ):
         raise InviteInvalid("초대가 유효하지 않습니다")
     return invite
+
+
+# 관리자가 옮길 수 있는 상태. pending으로 되돌리는 길은 두지 않는다 — 신청 시점을
+# 되살리는 것이 아니라 상태만 뒤집는 것이라 의미가 없다
+ASSIGNABLE_STATUSES = ("active", "rejected", "disabled")
+
+
+def set_user_status(
+    session: Session,
+    user: User,
+    status: str,
+    *,
+    reviewer: User | None = None,
+    quota_minutes: int | None = None,
+    quota_bytes: int | None = None,
+) -> User:
+    """계정 상태를 옮긴다. 승인·거절·중지·재개가 전부 이 길을 지난다.
+
+    활성에서 벗어나면 그 사람의 세션을 전부 끊는다. 안 끊으면 중지된 사람의 브라우저가
+    최대 90일 동안 살아 있다.
+    """
+    from .auth import revoke_other_sessions
+
+    if status not in ASSIGNABLE_STATUSES:
+        raise MemberInvalid(f"계정 상태는 {', '.join(ASSIGNABLE_STATUSES)} 중 하나여야 합니다")
+    if status == "active":
+        return approve(
+            session, user, reviewer=reviewer, quota_minutes=quota_minutes, quota_bytes=quota_bytes
+        )
+    if status == "rejected":
+        reject(session, user, reviewer=reviewer)
+    else:
+        user.status = "disabled"
+        user.reviewed_by_user_id = reviewer.id if reviewer is not None else None
+        user.reviewed_at = datetime.now(UTC)
+        session.flush()
+    revoke_other_sessions(session, user)
+    return user
+
+
+def list_users(session: Session, status: str | None = None, *, limit: int = 100) -> list[User]:
+    """상태로 걸러 계정을 나열한다. 거절된 계정을 찾을 길이 이것뿐이다."""
+    stmt = select(User).order_by(User.created_at)
+    if status is not None:
+        stmt = stmt.where(User.status == status)
+    return list(session.scalars(stmt.limit(limit)).all())

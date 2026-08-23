@@ -592,3 +592,23 @@ def test_중지된_계정은_링크의_잠금을_우회하지_못한다(client, 
     assert body["speaker_names"] == {}
     assert body["allow_audio"] is False
     assert theirs.get(f"/api/shared/{token}/audio").status_code == 403
+
+
+def test_공개_응답은_내부_상태를_그대로_내보내지_않는다(client, guest, db, mine):
+    """quota_blocked를 그대로 주면 소유자의 한도 상태가 링크로 샌다."""
+    token = make_link(client, mine)["token"]
+    mine.status = "quota_blocked"
+    db.commit()
+
+    body = guest.get(f"/api/shared/{token}").json()
+
+    assert body["status"] == "unavailable"
+
+
+def test_처리_중이면_처리_중이라고만_말한다(client, guest, db, mine):
+    """받는 사람은 전사가 끝나기 전에 연다. 어느 단계인지까지 알려줄 이유는 없다."""
+    token = make_link(client, mine)["token"]
+    mine.status = "summarizing"
+    db.commit()
+
+    assert guest.get(f"/api/shared/{token}").json()["status"] == "processing"

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from . import auth
 from .api_schemas import (
+    AccountStatusIn,
     LoginIn,
     MeOut,
     PasswordChangeIn,
@@ -22,7 +23,15 @@ from .api_schemas import (
 from .deps import Deps, user_workspaces
 from .models import User, Workspace, WorkspaceMember
 from .ratelimit import PER_SOURCE, PER_TARGET, source_key, target_key
-from .tenancy import EmailTaken, approve, find_user, reject, signup
+from .tenancy import (
+    ASSIGNABLE_STATUSES,
+    EmailTaken,
+    MemberInvalid,
+    find_user,
+    list_users,
+    set_user_status,
+    signup,
+)
 
 # 로그인 실패 문구는 어느 쪽이 틀렸는지 알려주지 않는다
 _BAD_LOGIN = "이메일 또는 비밀번호가 올바르지 않습니다"
@@ -253,56 +262,56 @@ def register(app: FastAPI, deps: Deps) -> None:
         session.commit()
         return Response(status_code=204)
 
-    @app.get("/api/admin/pending", response_model=list[PendingUserOut])
-    def list_pending(
+    @app.get("/api/admin/users", response_model=list[PendingUserOut])
+    def list_accounts(
+        status: str = "pending",
         admin: User = Depends(deps.require_service_admin),
         session: Session = Depends(deps.db),
     ) -> list[PendingUserOut]:
-        rows = session.scalars(
-            select(User).where(User.status == "pending").order_by(User.created_at)
-        ).all()
+        """상태로 걸러 계정을 나열한다.
+
+        대기만 볼 수 있던 때는 거절된 계정을 찾을 길이 없었다. 이메일이 남아 재가입도
+        막히므로 관리자가 되돌리려면 목록에 나와야 한다.
+        """
+        if status not in (*ASSIGNABLE_STATUSES, "pending"):
+            raise HTTPException(422, "그런 계정 상태가 없습니다")
         return [
             PendingUserOut(
                 id=row.public_id,
                 email=row.email,
                 name=row.display_name,
+                status=row.status,
                 signup_note=row.signup_note,
                 requested_at=row.created_at,
             )
-            for row in rows
+            for row in list_users(session, status)
         ]
 
-    @app.post("/api/admin/pending/{user_public_id}/approve", response_model=MeOut)
-    def approve_route(
+    @app.put("/api/admin/users/{user_public_id}/status", response_model=MeOut)
+    def change_account_status(
         user_public_id: uuid.UUID,
+        body: AccountStatusIn,
         admin: User = Depends(deps.require_service_admin),
         session: Session = Depends(deps.db),
         _: None = Depends(deps.require_csrf),
     ) -> MeOut:
-        target = _target_user(session, user_public_id)
-        approve(
-            session,
-            target,
-            reviewer=admin,
-            quota_minutes=cfg.default_quota_minutes,
-            quota_bytes=cfg.default_quota_bytes,
-        )
-        session.commit()
-        return _me(session, target)
-
-    @app.post("/api/admin/pending/{user_public_id}/reject", status_code=204)
-    def reject_route(
-        user_public_id: uuid.UUID,
-        admin: User = Depends(deps.require_service_admin),
-        session: Session = Depends(deps.db),
-        _: None = Depends(deps.require_csrf),
-    ) -> Response:
+        """승인, 거절, 중지, 재개가 전부 이 길을 지난다."""
         target = _target_user(session, user_public_id)
         if target.id == admin.id:
-            raise HTTPException(422, "자기 계정은 거절할 수 없습니다")
-        reject(session, target, reviewer=admin)
+            raise HTTPException(422, "자기 계정의 상태는 바꿀 수 없습니다")
+        try:
+            set_user_status(
+                session,
+                target,
+                body.status,
+                reviewer=admin,
+                quota_minutes=cfg.default_quota_minutes,
+                quota_bytes=cfg.default_quota_bytes,
+            )
+        except MemberInvalid as exc:
+            raise HTTPException(422, str(exc)) from None
         session.commit()
-        return Response(status_code=204)
+        return _me(session, target)
 
     def _target_user(session: Session, public_id: uuid.UUID) -> User:
         target = session.scalar(select(User).where(User.public_id == public_id))

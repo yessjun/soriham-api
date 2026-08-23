@@ -24,7 +24,7 @@ from .models import (
     ShareLink,
     User,
 )
-from .tenancy import normalize_email
+from .tenancy import MemberInvalid, valid_email
 
 LINK_DEFAULT_DAYS = 30
 # 사람이 손으로 넣는 값이라 상한을 둔다. 무기한은 일수가 아니라 None으로 말한다
@@ -59,9 +59,10 @@ def share_with_email(
     미가입이라고 거절하면 "먼저 가입하라고 말한 다음 다시 공유"라는 절차가 생긴다.
     """
     validate_permission(permission)
-    normalized = normalize_email(email)
-    if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
-        raise ShareInvalid("이메일 주소가 올바르지 않습니다")
+    try:
+        normalized = valid_email(email)
+    except MemberInvalid as exc:
+        raise ShareInvalid(str(exc)) from None
 
     target = db.scalar(select(User).where(User.email == normalized))
     if target is not None and created_by is not None and target.id == created_by.id:

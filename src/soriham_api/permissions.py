@@ -86,6 +86,9 @@ def resolve_workspace_perm(db: Session, principal: Principal, workspace_id: int)
     if not principal.has_own_access:
         return Perm.NONE
     if principal.is_service_admin:
+        # 목록·검색·업로드가 전부 이 길을 지난다. 녹음 쪽에만 로그를 남기면 관리자
+        # 접근의 대부분이 기록에 안 남는다
+        logger.warning("서비스 관리자 권한으로 워크스페이스 접근: user_id=%s", principal.user_id)
         return Perm.ADMIN
     role = db.scalar(
         select(WorkspaceMember.role).where(
