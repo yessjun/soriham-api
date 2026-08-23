@@ -300,3 +300,83 @@ def test_남의_워크스페이스는_없는_것처럼_답한다(app, other_work
         mine.post(f"/api/workspaces/{other_workspace.public_id}/invites", json={}).status_code
         == 404
     )
+
+
+# --- 검토가 잡은 것 --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"role": "banana"},
+        {"role": "Owner"},  # 대문자라 소유자 가드를 지나친다
+        {"expires_in_days": 10**12},
+        {"expires_in_days": 0},
+        {"max_uses": 0},
+    ],
+)
+def test_이상한_초대_입력은_422로_거절한다(client, workspace, body):
+    """검사 제약까지 내려가면 사용자에게 500으로 보인다.
+
+    검증을 라우트가 아니라 서비스 계층에 둔다 — 라우트에만 두면 CLI 경로가 같은 값을
+    그대로 DB까지 내려보낸다.
+    """
+    resp = client.post(f"/api/workspaces/{workspace.public_id}/invites", json=body)
+
+    assert resp.status_code == 422, resp.text
+
+
+def test_이메일을_지정한_초대는_미리보기도_그_사람만_본다(client, app, workspace, friend):
+    """수락은 막히는데 이름은 새는 상태였다. 지정 초대의 요지가 미리보기에서 무너진다."""
+    issued = client.post(
+        f"/api/workspaces/{workspace.public_id}/invites",
+        json={"email": "someone-else@example.com"},
+    ).json()
+
+    theirs = as_user(app, friend)
+    preview = theirs.get(f"/api/invites/{issued['token']}")
+
+    assert preview.status_code == 404
+    assert "테스트" not in preview.text
+    assert theirs.post(f"/api/invites/{issued['token']}/accept").status_code == 404
+
+
+def test_만료된_초대는_미리보기도_수락도_안_된다(client, app, db, workspace, friend):
+    """만료 판정이 두 경로에 각각 있어 한쪽만 깨져도 아무 테스트가 울지 않았다."""
+    from datetime import UTC, datetime, timedelta
+
+    issued = client.post(f"/api/workspaces/{workspace.public_id}/invites", json={}).json()
+    invite = db.scalars(select(Invite)).one()
+    invite.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+
+    theirs = as_user(app, friend)
+    assert theirs.get(f"/api/invites/{issued['token']}").status_code == 404
+    assert theirs.post(f"/api/invites/{issued['token']}/accept").status_code == 404
+
+
+def test_뺀_사람_앞으로_걸린_초대는_함께_철회된다(client, app, db, workspace, friend):
+    """남겨 두면 방금 뺀 사람이 같은 토큰으로 다시 들어온다."""
+    issued = client.post(
+        f"/api/workspaces/{workspace.public_id}/invites",
+        json={"email": friend.email, "max_uses": 5},
+    ).json()
+    theirs = as_user(app, friend)
+    assert theirs.post(f"/api/invites/{issued['token']}/accept").status_code == 200
+
+    client.delete(f"/api/workspaces/{workspace.public_id}/members/{friend.public_id}")
+
+    assert theirs.post(f"/api/invites/{issued['token']}/accept").status_code == 404
+
+
+def test_누구에게나_연_초대는_제외로_닫히지_않는다(client, app, db, workspace, friend):
+    """이메일을 지정하지 않은 초대는 특정인이 아니라 열어 둔 자리다. 닫으려면 철회한다."""
+    issued = client.post(
+        f"/api/workspaces/{workspace.public_id}/invites", json={"max_uses": 5}
+    ).json()
+    theirs = as_user(app, friend)
+    theirs.post(f"/api/invites/{issued['token']}/accept")
+
+    client.delete(f"/api/workspaces/{workspace.public_id}/members/{friend.public_id}")
+
+    assert theirs.post(f"/api/invites/{issued['token']}/accept").status_code == 200

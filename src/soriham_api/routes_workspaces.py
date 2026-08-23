@@ -142,12 +142,6 @@ def register(app: FastAPI, deps: Deps) -> None:
         _: None = Depends(deps.require_csrf),
     ) -> IssuedInviteOut:
         _require_admin(ctx)
-        if body.role == "owner":
-            raise HTTPException(422, "소유자로는 초대할 수 없습니다")
-        if body.max_uses < 1:
-            raise HTTPException(422, "사용 횟수는 1 이상이어야 합니다")
-        if body.expires_in_days is not None and body.expires_in_days < 1:
-            raise HTTPException(422, "만료 기간은 1일 이상이어야 합니다")
         try:
             issued = create_invite(
                 session,
@@ -158,7 +152,7 @@ def register(app: FastAPI, deps: Deps) -> None:
                 expires_in_days=body.expires_in_days,
                 max_uses=body.max_uses,
             )
-        except ValueError as exc:
+        except (MemberInvalid, ValueError) as exc:
             raise HTTPException(422, str(exc)) from None
         session.commit()
         return IssuedInviteOut(**_invite_out(issued.invite).model_dump(), token=issued.token)
@@ -184,7 +178,7 @@ def register(app: FastAPI, deps: Deps) -> None:
     ) -> InvitePreviewOut:
         """어디로 부르는 초대인지만 알려준다. 구성원 목록도 녹음도 아직 아니다."""
         try:
-            invite = peek_invite(session, token)
+            invite = peek_invite(session, token, user)
         except InviteInvalid:
             raise HTTPException(404, "초대가 유효하지 않습니다") from None
         workspace = session.get(Workspace, invite.workspace_id)
