@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from soriham_api.ingest import scan
 from soriham_api.models import JobLog, Recording, Segment
-from soriham_api.worker import claim_next, process_one, recover_in_flight
+from soriham_api.worker import (
+    HEARTBEAT_EVERY,
+    claim_next,
+    process_one,
+    recover_in_flight,
+)
 
 RESULT = {
     "language": "ko",
@@ -239,7 +245,7 @@ def test_화자분리_실패는_화면에_남는다(db, tmp_path: Path, workspac
     result["meta"] = {"diarized": False, "diarize_error": "RuntimeError: 디코더 실패"}
 
     class Enricher:
-        def enrich(self, session, rec) -> None:
+        def enrich(self, session, rec, **_) -> None:
             rec.summary = "요약"
 
     process_one(db, FakeRunnerClient(result=result), model=None, language=None, enricher=Enricher())
@@ -261,7 +267,7 @@ def test_소음_세그먼트는_요약에_들어가지_않는다(db, tmp_path: P
     captured: list[str] = []
 
     class Enricher:
-        def enrich(self, session, rec) -> None:
+        def enrich(self, session, rec, **_) -> None:
             from soriham_api.enrich import build_transcript
 
             captured.append(build_transcript(session, rec))
@@ -381,3 +387,50 @@ def test_다시_시도는_워크스페이스로_좁힐_수_있다(db, tmp_path: 
 
     db.refresh(theirs)
     assert theirs.status == "error"
+
+
+def test_정리_주기가_멈춘_작업도_회수한다(db, tmp_path: Path, workspace, engine):
+    """기동할 때만 회수하면, 단계 중간에 상태가 굳은 행은 워커를 다시 띄울 때까지
+    처리 중으로 남는다. 백로그를 몇 주씩 도는 동안 그럴 일이 없다."""
+    from sqlalchemy.orm import sessionmaker
+
+    from soriham_api.worker import idle_maintenance
+
+    rows = register(db, tmp_path, ["a.wav"], workspace)
+    rows[0].status = "transcribing"
+    db.commit()
+    db.execute(
+        update(Recording)
+        .where(Recording.id == rows[0].id)
+        .values(updated_at=datetime.now(UTC) - timedelta(hours=1))
+    )
+    db.commit()
+
+    idle_maintenance(sessionmaker(bind=engine))
+
+    db.refresh(rows[0])
+    assert rows[0].status == "pending"
+    assert rows[0].progress is None
+
+
+def test_요약이_길어도_살아_있다고_알린다(db, tmp_path: Path, workspace):
+    """요약은 LLM 호출이라 청크마다 몇 분씩 걸린다. 아무 기록도 안 남기면 옆 워커가
+    죽은 작업으로 보고 같은 녹취록을 두 번 요약한다."""
+    beats: list[datetime] = []
+
+    class SlowEnricher:
+        def enrich(self, session, recording, *, on_step=None) -> None:
+            if on_step is not None:
+                # 하트비트 간격을 넘긴 척한다
+                recording.updated_at = datetime.now(UTC) - HEARTBEAT_EVERY * 2
+                session.commit()
+                on_step()
+                beats.append(recording.updated_at)
+            recording.summary = "요약"
+
+    register(db, tmp_path, ["a.wav"], workspace)
+    assert process_one(db, FakeRunnerClient(), enricher=SlowEnricher()) is True
+
+    assert beats, "요약 도중에 하트비트를 받지 못했다"
+    row = db.scalars(select(Recording)).one()
+    assert datetime.now(UTC) - row.updated_at < HEARTBEAT_EVERY

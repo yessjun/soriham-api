@@ -174,6 +174,9 @@ def ingest_file(
 # 스캔 도중 몇 건마다 커밋할지. 1만 개짜리 폴더를 한 트랜잭션으로 몰면 파일마다 도는
 # ffprobe 때문에 수십 분이 걸리고, 그 사이 끊기면 등록이 통째로 사라진다
 SCAN_COMMIT_EVERY = 200
+# 이번 스캔이 파일을 하나도 못 봤을 때, 몇 건 넘게 사라진 것으로 보이면 디스크가
+# 없는 것으로 보고 유실 판정을 건너뛴다
+SWEEP_BLACKOUT_MIN = 20
 
 
 def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict[str, int]:
@@ -208,17 +211,35 @@ def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict
     # 범위를 좁히는 두 조건이 없으면 스캔 한 번에 **다른 사람의 업로드가 전부** missing이
     # 된다 — 그들의 파일은 이 폴더에 있을 이유가 없으므로 전부 "사라진 것"으로 보인다.
     # source까지 보는 이유: 스캔 워크스페이스에 섞여 들어온 업로드본도 지켜야 한다.
+    #
     prefixes = tuple(str(d.resolve()) + os.sep for d in dirs if d.is_dir())
-    for recording in session.scalars(
-        select(Recording).where(
-            Recording.status != "missing",
-            Recording.workspace_id == workspace_id,
-            Recording.source == "scan",
+    gone = [
+        recording
+        for recording in session.scalars(
+            select(Recording).where(
+                Recording.status != "missing",
+                Recording.workspace_id == workspace_id,
+                Recording.source == "scan",
+            )
         )
-    ):
-        if recording.path.startswith(prefixes) and recording.path not in seen:
-            recording.status = "missing"
-            stats["missing"] += 1
+        if recording.path.startswith(prefixes) and recording.path not in seen
+    ]
+    # 이번 스캔에서 오디오를 하나도 못 봤는데 지워야 할 것이 무더기라면 폴더가 빈 것이
+    # 아니라 디스크가 없는 것이다. 마운트가 풀린 자리는 빈 폴더로 남아 is_dir()가
+    # 참이므로 이 구분을 다른 데서 할 수 없다. 사람이 손으로 지운 몇 건은 그대로 반영하고,
+    # 무더기만 막는다 — 문턱은 어림값이고, 넘겨 놓친 것은 다음 스캔이 잡는다
+    if not seen and len(gone) > SWEEP_BLACKOUT_MIN:
+        logger.warning(
+            "오디오를 하나도 못 봤는데 %d건이 사라진 것으로 보임 — 유실 판정을 건너뜀", len(gone)
+        )
+        gone = []
+    for recording in gone:
+        recording.status = "missing"
+        stats["missing"] += 1
+        since_commit += 1
+        if since_commit >= SCAN_COMMIT_EVERY:
+            session.commit()
+            since_commit = 0
 
     session.commit()
     return stats
