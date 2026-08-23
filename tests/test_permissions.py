@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from soriham_api import auth
@@ -123,7 +125,7 @@ def test_링크로는_고칠_수_없다(db, rec):
 def test_로그인_상태로_링크를_열면_높은_쪽이_이긴다(db, workspace, rec):
     user = make_user(db, "member@example.com")
     add_member(db, workspace, user, "member")
-    principal = Principal(user_id=user.id, link_recording_id=rec.id)
+    principal = replace(Principal.for_user(user), link_recording_id=rec.id)
     assert resolve_recording_perm(db, principal, rec) == Perm.MANAGE
 
 
@@ -158,7 +160,9 @@ def test_로그인만_했다고_링크의_잠금이_풀리지_않는다(db, work
     """승인제라 링크를 받는 사람은 거의 다 로그인 상태다. 로그인 여부로 가르면
     잠금이 아무도 못 막는다."""
     bystander = make_user(db, "bystander@example.com")
-    principal = Principal(user_id=bystander.id, link_recording_id=rec.id, link_allows_audio=False)
+    principal = replace(
+        Principal.for_user(bystander), link_recording_id=rec.id, link_allows_audio=False
+    )
     own = resolve_own_perm(db, principal, rec)
 
     assert own == Perm.NONE
@@ -170,7 +174,9 @@ def test_스스로_볼_권한이_있으면_링크_잠금과_무관하다(db, wor
     """어차피 다른 길로 듣는 사람에게 링크의 잠금은 의미가 없다."""
     member = make_user(db, "member@example.com")
     add_member(db, workspace, member, "member")
-    principal = Principal(user_id=member.id, link_recording_id=rec.id, link_allows_audio=False)
+    principal = replace(
+        Principal.for_user(member), link_recording_id=rec.id, link_allows_audio=False
+    )
     own = resolve_own_perm(db, principal, rec)
 
     assert own == Perm.MANAGE
@@ -181,8 +187,8 @@ def test_공유받은_사람도_링크_잠금과_무관하다(db, workspace, rec
     guest = make_user(db, "guest@example.com")
     db.add(RecordingShare(recording_id=rec.id, user_id=guest.id, permission="view"))
     db.flush()
-    principal = Principal(
-        user_id=guest.id, link_recording_id=rec.id, link_allows_speaker_names=False
+    principal = replace(
+        Principal.for_user(guest), link_recording_id=rec.id, link_allows_speaker_names=False
     )
     own = resolve_own_perm(db, principal, rec)
 
@@ -216,3 +222,44 @@ def test_잠금_기본값은_잠긴_쪽이다():
     principal = Principal(link_recording_id=1)
     assert principal.link_allows_audio is False
     assert principal.link_allows_speaker_names is False
+
+
+def test_활성이_아닌_계정은_스스로_얻은_권한이_전부_죽는다(db, workspace, rec):
+    """중지·대기 계정이 워크스페이스 역할로 링크의 잠금을 우회하고 있었다.
+
+    라우트 의존성이 계정 상태를 보지만 공유 링크는 그 의존성을 지나지 않는다.
+    상태를 보는 자리가 규칙 함수 밖에 있으면 새 라우트마다 같은 구멍이 다시 생긴다.
+    """
+    member = make_user(db, "stopped@example.com")
+    add_member(db, workspace, member, "owner")
+    member.status = "disabled"
+    db.flush()
+    principal = Principal.for_user(member)
+
+    assert resolve_recording_perm(db, principal, rec) == Perm.NONE
+    assert resolve_workspace_perm(db, principal, workspace.id) == Perm.NONE
+
+
+def test_활성이_아니면_서비스_관리자도_통하지_않는다(db, other_workspace, rec):
+    admin = make_user(db, "stopped-admin@example.com", admin=True)
+    admin.status = "disabled"
+    db.flush()
+
+    assert resolve_recording_perm(db, Principal.for_user(admin), rec) == Perm.NONE
+
+
+def test_활성이_아닌_계정도_링크로는_남들만큼_본다(db, workspace, rec):
+    """링크는 누구에게나 열린다. 중지된 계정이라고 익명보다 적게 볼 이유는 없다."""
+    member = make_user(db, "pending@example.com")
+    add_member(db, workspace, member, "owner")
+    member.status = "pending"
+    db.flush()
+    principal = replace(
+        Principal.for_user(member), link_recording_id=rec.id, link_allows_audio=False
+    )
+
+    assert resolve_recording_perm(db, principal, rec) == Perm.VIEW
+    own = resolve_own_perm(db, principal, rec)
+    assert own == Perm.NONE
+    # 자기 권한이 죽었으므로 링크의 잠금이 이제 이 사람에게도 걸린다
+    assert can_play_audio(principal, own) is False

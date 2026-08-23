@@ -48,6 +48,9 @@ class Principal:
     """
 
     user_id: int | None = None
+    # 승인 대기·거절·중지된 계정은 스스로 얻은 권한이 전부 죽는다. 기본값이 False인
+    # 것은 잠긴 쪽이 기본이기 때문이다 — 새 호출부가 이 값을 빠뜨리면 열리는 대신 막힌다
+    is_active: bool = False
     is_service_admin: bool = False
     # 링크로 들어온 경우: 그 링크가 가리키는 녹음 하나에만 열람 권한이 생긴다
     link_recording_id: int | None = None
@@ -66,15 +69,24 @@ class Principal:
 
     @classmethod
     def for_user(cls, user: User) -> Principal:
-        return cls(user_id=user.id, is_service_admin=user.is_service_admin)
+        return cls(
+            user_id=user.id,
+            is_active=user.status == "active",
+            is_service_admin=user.is_service_admin,
+        )
+
+    @property
+    def has_own_access(self) -> bool:
+        """스스로 권한을 가질 수 있는 상태인가. 링크로 받는 권한은 여기 걸리지 않는다."""
+        return self.user_id is not None and self.is_active
 
 
 def resolve_workspace_perm(db: Session, principal: Principal, workspace_id: int) -> Perm:
     """워크스페이스 단위 권한. 링크 열람자는 워크스페이스에 아무 권한이 없다."""
+    if not principal.has_own_access:
+        return Perm.NONE
     if principal.is_service_admin:
         return Perm.ADMIN
-    if principal.user_id is None:
-        return Perm.NONE
     role = db.scalar(
         select(WorkspaceMember.role).where(
             WorkspaceMember.workspace_id == workspace_id,
@@ -85,8 +97,13 @@ def resolve_workspace_perm(db: Session, principal: Principal, workspace_id: int)
 
 
 def resolve_recording_perm(db: Session, principal: Principal, recording: Recording) -> Perm:
-    """녹음 하나에 대한 유효 권한. 모든 경로의 최댓값이다."""
-    if principal.is_service_admin:
+    """녹음 하나에 대한 유효 권한. 모든 경로의 최댓값이다.
+
+    계정이 활성이 아니면 스스로 얻은 권한은 전부 없는 것으로 본다. 링크로 받는
+    VIEW는 남는다 — 링크는 누구에게나 열리는 것이고, 중지된 계정이라고 남들보다
+    적게 볼 이유는 없다.
+    """
+    if principal.is_service_admin and principal.is_active:
         # 이것이 결정 근거가 되는 경우는 드물어야 한다 — 드물지 않으면 역할이 잘못된 것
         logger.warning(
             "서비스 관리자 권한으로 접근: user_id=%s recording=%s",
@@ -98,7 +115,7 @@ def resolve_recording_perm(db: Session, principal: Principal, recording: Recordi
     best = Perm.NONE
     if principal.link_recording_id is not None and principal.link_recording_id == recording.id:
         best = Perm.VIEW
-    if principal.user_id is None:
+    if not principal.has_own_access:
         return best
 
     role = db.scalar(
