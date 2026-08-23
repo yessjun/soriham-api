@@ -28,6 +28,7 @@ from soriham_api.api_schemas import (
     TagIn,
     TagOut,
     TitleIn,
+    UsageOut,
 )
 from soriham_api.config import Settings, load_settings
 from soriham_api.db import make_session_factory
@@ -37,9 +38,17 @@ from soriham_api.ingest import (
     find_duplicate,
     ingest_file,
     partial_hash,
+    probe_duration,
 )
 from soriham_api.models import JobLog, Recording, SpeakerName, Tag, User, Workspace
 from soriham_api.permissions import Perm, Principal, resolve_recording_perm
+from soriham_api.quota import (
+    QuotaExceeded,
+    Usage,
+    check_minutes,
+    check_storage,
+    measure,
+)
 from soriham_api.routes_auth import register as register_auth_routes
 from soriham_api.storage import (
     AudioUnavailable,
@@ -176,6 +185,16 @@ def create_app(
         with upload_lock:
             dest: Path | None = None
             try:
+                usage = measure(session, workspace)
+                try:
+                    check_storage(usage, staged.stat().st_size)
+                except QuotaExceeded as exc:
+                    raise HTTPException(413, str(exc)) from None
+                # 길이는 자리를 정하기 전에 본다. 여기서 거절하면 파일이 남지 않는다
+                try:
+                    check_minutes(usage, probe_duration(staged))
+                except QuotaExceeded as exc:
+                    raise HTTPException(413, str(exc)) from None
                 digest = partial_hash(staged, staged.stat().st_size)
                 original = find_duplicate(session, digest, workspace_id=workspace.id)
                 if original is not None:
@@ -427,6 +446,20 @@ def create_app(
             )
         return SearchResult(hits=hits[:limit])
 
+    @app.get("/api/workspaces/{workspace_id}/usage", response_model=UsageOut)
+    def workspace_usage(
+        ctx: WorkspaceContext = Depends(deps.workspace_ctx),
+        session: Session = Depends(db),
+    ) -> UsageOut:
+        usage: Usage = measure(session, ctx.workspace)
+        return UsageOut(
+            used_minutes=round(usage.used_minutes, 1),
+            quota_minutes=usage.quota_minutes,
+            used_bytes=usage.used_bytes,
+            quota_bytes=usage.quota_bytes,
+            window_days=usage.window_days,
+        )
+
     @app.get("/api/workspaces/{workspace_id}/stats", response_model=Stats)
     def stats(
         ctx: WorkspaceContext = Depends(deps.workspace_ctx),
@@ -447,7 +480,11 @@ def create_app(
             .group_by(Recording.status)
         ).all()
         by_status = [StatusCount(status=s, count=c, audio_sec=float(a)) for s, c, a in rows]
-        total_audio = sum(x.audio_sec for x in by_status if x.status != "duplicate")
+        # 중복과 한도 보류는 처리 대상이 아니다. 분모에 넣으면 완료 비율이
+        # 영원히 100%에 못 닿는다
+        total_audio = sum(
+            x.audio_sec for x in by_status if x.status not in ("duplicate", "quota_blocked")
+        )
         done_audio = sum(x.audio_sec for x in by_status if x.status == "done")
 
         # 최근 전사 실측 20건으로 처리 배속 추정

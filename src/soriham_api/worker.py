@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from soriham_api.ingest import resume_status
 from soriham_api.models import JobLog, Recording, Segment
+from soriham_api.quota import allows_transcription
 from soriham_api.stt_client import RunnerClient
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,31 @@ def requeue_unenriched(session: Session) -> int:
             count += 1
     session.commit()
     return count
+
+
+def idle_maintenance(session_factory: sessionmaker[Session]) -> None:
+    """할 일이 없을 때 도는 정리.
+
+    한도 해제를 기동 시에만 보면 데몬이 재시작될 때까지 풀리지 않는다. 30일 창이
+    지나도, 관리자가 한도를 올려도 그대로 서 있는다.
+    """
+    with session_factory() as session:
+        released = release_quota_blocked(session)
+    if released:
+        logger.info("한도가 풀려 %d건을 큐로 되돌림", released)
+
+
+def release_quota_blocked(session: Session) -> int:
+    """한도에 걸려 세워둔 녹음 중 지금은 통과하는 것을 큐로 되돌린다."""
+    blocked = session.scalars(select(Recording).where(Recording.status == "quota_blocked")).all()
+    released = 0
+    for recording in blocked:
+        if allows_transcription(session, recording):
+            recording.status = "pending"
+            released += 1
+    if released:
+        session.commit()
+    return released
 
 
 def claim_next(session: Session) -> Recording | None:
@@ -238,6 +264,12 @@ def process_one(
     # 예외가 격리를 뚫고 나간다. 지금 배치에서는 속성이 이미 적재돼 있어 닿지 않지만,
     # 그 사정에 기대고 싶지 않은 자리다
     name = recording.filename
+    if not allows_transcription(session, recording):
+        # 고장이 아니라 풀리는 상태다. 기간이 지나거나 한도가 오르면 되돌아온다
+        recording.status = "quota_blocked"
+        session.commit()
+        logger.info("사용량 한도로 보류: %s", name)
+        return True
     logger.info("처리 시작: %s (%s)", name, recording.status)
     try:
         if recording.status != "enriching":
@@ -276,6 +308,7 @@ def run_worker(
                     session, runner, model=model, language=language, enricher=enricher
                 )
             if not worked:
+                idle_maintenance(session_factory)
                 time.sleep(idle_sleep_sec)
         except KeyboardInterrupt:
             logger.info("워커 종료")
