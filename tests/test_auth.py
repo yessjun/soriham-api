@@ -80,6 +80,24 @@ def test_만료된_세션은_없는_것과_같다(db, user):
     assert auth.load_session(db, issued.token) is None
 
 
+def test_처음_발급된_세션은_유휴_기간만큼만_산다(db, user):
+    """절대 만료(90일)를 유휴 만료로 잘못 쓰면 손대지 않은 세션이 석 달을 산다."""
+    now = datetime.now(UTC)
+    issued = auth.create_session(db, user, now=now)
+    db.commit()
+    assert issued.session.expires_at == now + timedelta(days=auth.SESSION_IDLE_DAYS)
+    assert issued.session.absolute_expires_at == now + timedelta(days=auth.SESSION_ABSOLUTE_DAYS)
+
+
+def test_절대_만료가_지났으면_유휴_기한이_남아도_죽는다(db, user):
+    """발급·갱신이 늘 절대 만료로 잘라주지만, 그 불변식이 깨져도 조회에서 걸러야 한다."""
+    now = datetime.now(UTC)
+    issued = auth.create_session(db, user, now=now)
+    issued.session.absolute_expires_at = now - timedelta(seconds=1)
+    db.commit()
+    assert auth.load_session(db, issued.token) is None
+
+
 def test_절대_만료는_유휴_갱신으로_넘지_못한다(db, user):
     """오래 켜둔 세션이 영원히 사는 것을 막는 한계선이다."""
     now = datetime.now(UTC)
