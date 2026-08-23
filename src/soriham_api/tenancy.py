@@ -1,7 +1,7 @@
 """사용자와 워크스페이스를 만들고 찾는다.
 
-사용자 가입·승인·초대는 비밀번호 해싱이 들어온 뒤에 이 모듈에 붙는다. 지금은 녹음이
-소속될 워크스페이스를 만들고 찾는 것까지다.
+승인 흐름과 초대는 라우트가 붙을 때 여기 이어진다. 지금은 계정과 워크스페이스를
+만들고 찾는 것까지다.
 """
 
 from __future__ import annotations
@@ -66,6 +66,30 @@ def create_workspace(
     session.add(workspace)
     session.flush()
     return workspace
+
+
+def create_user(
+    session: Session,
+    *,
+    email: str,
+    password_hash: str,
+    display_name: str,
+    status: str = "pending",
+    is_service_admin: bool = False,
+    signup_note: str | None = None,
+) -> User:
+    """계정을 만든다. 기본은 승인 대기다 — 가입은 열려 있고 관문은 상태다."""
+    user = User(
+        email=normalize_email(email),
+        password_hash=password_hash,
+        display_name=display_name,
+        status=status,
+        is_service_admin=is_service_admin,
+        signup_note=signup_note,
+    )
+    session.add(user)
+    session.flush()
+    return user
 
 
 def add_member(session: Session, workspace: Workspace, user: User, role: str) -> WorkspaceMember:
