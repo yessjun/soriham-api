@@ -8,7 +8,8 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -531,7 +532,30 @@ def create_app(
             recent_errors=[_summary(r) for r in recent_errors],
         )
 
+    if cfg.console_dir is not None:
+        _serve_console(app, cfg.console_dir)
     return app
+
+
+def _serve_console(app: FastAPI, root: Path) -> None:
+    """콘솔 빌드를 같은 오리진에서 서빙한다.
+
+    세션 쿠키가 SameSite=Lax라 오디오 태그가 도는 조건이 같은 사이트다. 오리진까지
+    같으면 CORS 설정 자체가 필요 없어진다.
+
+    라우트 등록이 전부 끝난 뒤에 붙인다. 앞에 두면 정적 폴백이 /api를 먼저 삼킨다.
+    """
+    index = root / "index.html"
+    app.mount("/assets", StaticFiles(directory=root / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def console(path: str) -> Response:
+        # 있는 파일이면 그대로, 아니면 index.html. 클라이언트 라우팅이라 /s/<토큰>이나
+        # /recordings/<id>로 새로고침해도 여기로 온다
+        candidate = (root / path).resolve()
+        if path and candidate.is_file() and candidate.is_relative_to(root.resolve()):
+            return FileResponse(candidate)
+        return FileResponse(index)
 
 
 def _apply_filters(

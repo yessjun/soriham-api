@@ -129,6 +129,7 @@ def make_settings(**overrides):
         cookie_secure=False,
         cookie_domain=None,
         auto_approve=False,
+        console_dir=None,
         # 운영 기본값과 같은 모양으로 둔다. 여기만 무제한으로 두면 "승인이 곧 무제한"
         # 이라는 결함이 테스트에서 영원히 안 보인다
         default_quota_minutes=600,

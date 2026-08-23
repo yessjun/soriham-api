@@ -463,3 +463,30 @@ def test_형식이_아닌_이메일로는_초대할_수_없다(db, workspace):
 
     with pytest.raises(MemberInvalid):
         create_invite(db, workspace=workspace, email="골뱅이없음")
+
+
+def test_비밀번호를_다시_정하면_다른_세션이_끊긴다(db):
+    """다시 정하는 이유는 대개 잃어버렸거나 샌 것이다. 세션을 남기면 바꾼 의미가 없다."""
+    from soriham_api.auth import create_session, hash_password, revoke_other_sessions
+    from soriham_api.models import UserSession
+
+    user = create_user(
+        db,
+        email="forgot@example.com",
+        password_hash=auth.hash_password("옛 암구호"),
+        display_name="잊음",
+        status="active",
+    )
+    create_session(db, user)
+    create_session(db, user)
+    db.commit()
+
+    user.password_hash = hash_password("새 암구호")
+    revoked = revoke_other_sessions(db, user)
+    db.commit()
+
+    assert revoked == 2
+    live = db.scalars(
+        select(UserSession).where(UserSession.user_id == user.id, UserSession.revoked_at.is_(None))
+    ).all()
+    assert live == []

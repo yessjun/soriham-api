@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     approve_p.add_argument("--reject", action="store_true", help="승인 대신 거절")
     pending_p = sub.add_parser("pending", help="승인 대기 중인 신청을 나열한다")
     pending_p.add_argument("--limit", type=int, default=50)
+    reset_p = sub.add_parser("reset-password", help="계정의 비밀번호를 다시 정한다")
+    reset_p.add_argument("--email", required=True)
     quota_p = sub.add_parser("quota", help="워크스페이스 사용량 한도를 정한다")
     quota_p.add_argument("--workspace", required=True, help="슬러그")
     quota_p.add_argument("--minutes", help="전사 시간 한도(분). unlimited면 무제한")
@@ -110,6 +112,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 session.commit()
                 print(f"승인했습니다: {user.email}")
+        return 0
+
+    if args.command == "reset-password":
+        from soriham_api.auth import hash_password, revoke_other_sessions
+        from soriham_api.tenancy import find_user
+
+        with session_factory() as session:
+            user = find_user(session, args.email)
+            if user is None:
+                parser.error(f"그런 계정이 없습니다: {args.email}")
+            user.password_hash = hash_password(_read_password())
+            # 비밀번호를 다시 정하는 이유는 대개 잃어버렸거나 샜기 때문이다.
+            # 열려 있던 세션을 남기면 바꾼 의미가 없다
+            revoked = revoke_other_sessions(session, user)
+            session.commit()
+            print(f"{user.email}의 비밀번호를 바꿨습니다 (세션 {revoked}개 종료)")
         return 0
 
     if args.command == "quota":

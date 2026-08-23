@@ -28,6 +28,8 @@ class Settings:
       **승인이 곧 무제한이 아니라는 것을 실제로 만드는 값이다.** `unlimited`를 넣으면
       무제한이 되지만 그러면 아무도 막히지 않는다. 소유자의 스캔 워크스페이스는
       부트스트랩이 따로 무제한으로 만든다
+    - CONSOLE_DIR: 콘솔 빌드 결과 폴더. 지정하면 api가 같은 오리진에서 함께 서빙한다.
+      비우면 서빙하지 않는다 (개발은 vite 프록시가 같은 오리진을 만든다)
     - EXPOSE_DOCS: /docs, /openapi.json 노출 여부 (기본 끔)
     - MAX_UPLOAD_MB: 업로드 한 건의 크기 상한 (기본 4096)
     - ENRICH_BACKEND: 제목/요약/태그 생성 백엔드 (ollama | claude | off)
@@ -47,6 +49,7 @@ class Settings:
     cookie_secure: bool
     cookie_domain: str | None
     auto_approve: bool
+    console_dir: Path | None
     default_quota_minutes: int | None
     default_quota_bytes: int | None
     expose_docs: bool
@@ -85,6 +88,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         cookie_secure=_flag(e, "COOKIE_SECURE", default=True),
         cookie_domain=e.get("COOKIE_DOMAIN") or None,
         auto_approve=_flag(e, "AUTO_APPROVE", default=False),
+        console_dir=Path(e["CONSOLE_DIR"]).expanduser() if e.get("CONSOLE_DIR") else None,
         default_quota_minutes=_quota(e, "DEFAULT_MONTHLY_MINUTES", default=600),
         default_quota_bytes=_gb_to_bytes(_quota(e, "DEFAULT_STORAGE_GB", default=20)),
         expose_docs=_flag(e, "EXPOSE_DOCS", default=False),
