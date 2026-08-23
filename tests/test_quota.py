@@ -70,7 +70,7 @@ def make_recording(
 
 
 def test_한도가_비어_있으면_무제한이다(db, workspace):
-    """주인의 스캔 워크스페이스가 이 상태다. 1만 시간 백로그가 자기 한도에 걸리면 안 된다."""
+    """소유자의 스캔 워크스페이스가 이 상태다. 1만 시간 백로그가 자기 한도에 걸리면 안 된다."""
     log_transcribe(db, workspace, minutes=100_000)
     usage = measure(db, workspace)
 

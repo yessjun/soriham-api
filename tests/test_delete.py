@@ -93,7 +93,7 @@ def test_업로드본을_지우면_원본_파일도_사라진다(client, db, wor
 
 
 def test_스캔본을_지워도_원본_파일은_남는다(client, db, workspace, tmp_path: Path):
-    """주인의 원본을 서비스가 지우지 않는다. 제자리 인덱싱의 전제다."""
+    """소유자의 원본을 서비스가 지우지 않는다. 제자리 인덱싱의 전제다."""
     recording = make_scan(db, workspace, tmp_path)
     path = Path(recording.path)
 

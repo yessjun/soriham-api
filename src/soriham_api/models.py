@@ -37,7 +37,7 @@ RECORDING_STATUSES = (
     # 한도가 오르면 풀린다
     "quota_blocked",
 )
-# 녹음이 들어온 경로. 업로드본은 서비스가 지울 수 있고 스캔본은 주인의 원본이라 두 곳의
+# 녹음이 들어온 경로. 업로드본은 서비스가 지울 수 있고 스캔본은 소유자의 원본이라 두 곳의
 # 처리가 갈린다 (삭제, 사라진 파일 스윕)
 RECORDING_SOURCES = ("upload", "scan")
 
@@ -120,7 +120,7 @@ class Workspace(TimestampMixin, Base):
     # 큐 라운드로빈용 — 이 워크스페이스가 마지막으로 일감을 가져간 시각.
     # NULL(한 번도 안 잡힘)이 맨 앞이라 새로 승인된 사람의 첫 업로드가 바로 돈다
     last_claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    # 사용량 한도. NULL은 무제한 — 주인의 스캔 워크스페이스가 그렇다
+    # 사용량 한도. NULL은 무제한 — 소유자의 스캔 워크스페이스가 그렇다
     quota_minutes: Mapped[int | None] = mapped_column(Integer)
     quota_bytes: Mapped[int | None] = mapped_column(BigInteger)
 
@@ -280,7 +280,7 @@ class ShareLink(TimestampMixin, Base):
     label: Mapped[str | None] = mapped_column(Text)
     password_hash: Mapped[str | None] = mapped_column(Text)
     allow_audio: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
-    # 화자 이름은 주인이 손으로 넣은 실명이라 노출을 따로 고르게 한다
+    # 화자 이름은 소유자가 손으로 넣은 실명이라 노출을 따로 고르게 한다
     allow_speaker_names: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text("true")
     )

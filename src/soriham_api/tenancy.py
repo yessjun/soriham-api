@@ -403,7 +403,7 @@ def bootstrap(
     """첫 운영자와 그의 워크스페이스. 승인할 사람이 먼저 있어야 한다.
 
     마이그레이션은 행을 넣지 않으므로 이 자리가 유일한 출발점이다. 한도는 비워 둔다 —
-    주인의 백로그가 자기 한도에 걸리면 안 된다.
+    소유자의 백로그가 자기 한도에 걸리면 안 된다.
     """
     existing = find_user(session, email)
     if existing is not None:

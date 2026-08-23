@@ -198,7 +198,7 @@ def test_링크를_뺀_권한이_링크_권한을_섞지_않는다(db, rec):
 
 
 def test_화자_이름_노출은_링크마다_고른다(db, rec):
-    """화자 이름은 주인이 손으로 넣은 실명이다."""
+    """화자 이름은 소유자가 손으로 넣은 실명이다."""
     hidden = Principal(link_recording_id=rec.id, link_allows_speaker_names=False)
     shown = Principal(link_recording_id=rec.id, link_allows_speaker_names=True)
     assert can_see_speaker_names(hidden, Perm.NONE) is False
