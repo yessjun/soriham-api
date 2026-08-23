@@ -59,7 +59,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def normalize_email(raw: str) -> str:
-    """비교와 저장에 쓰는 단일 형태. 스키마의 lower() CHECK가 이 함수를 강제한다.
+    """비교와 저장에 쓰는 단일 형태. 스키마에 lower() CHECK가 있어서 안 거치면 INSERT가 터진다.
 
     조회에도 쓰이므로 형식은 보지 않는다. 계정이나 초대를 만들 때는 valid_email을 쓴다.
     """
@@ -600,8 +600,8 @@ def peek_invite(
     """받는 사람 화면이 "어디로 부르는 초대인지"를 그리기 위한 조회.
 
     **받을 사람을 `accept_invite`와 같은 규칙으로 검사한다.** 여기서 빠뜨리면 이메일을
-    지정한 초대의 요지("그 사람만")가 미리보기에서 무너진다 — 대상이 아닌 사람이
-    토큰만 쥐고 워크스페이스 이름을 얻는다. 수락은 막히는데 이름은 새는 상태다.
+    이메일을 지정한 초대인데 대상이 아닌 사람이 토큰만 쥐고 워크스페이스 이름을 얻는다.
+    수락은 막히고 이름만 새는 상태가 된다.
     """
     invite = _live_invite(session, raw_token, now=now)
     if invite.email is not None and invite.email != user.email:

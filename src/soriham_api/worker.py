@@ -118,7 +118,7 @@ def claim_next(session: Session) -> Recording | None:
     뒤에 선다. GPU가 하나라 여기가 유일한 직렬화 지점이므로, 공정성을 넣을 자리도
     여기뿐이다.
 
-    **잠금 순서는 항상 workspaces → recordings.** 뒤집으면 데드락이고, 그건 부하가
+    잠금 순서는 항상 workspaces 다음 recordings다. 뒤집으면 데드락이 나고, 부하가
     걸려야 드러난다.
     """
     eligible = _workspaces_with_work(session)
@@ -146,8 +146,8 @@ def claim_next(session: Session) -> Recording | None:
         if workspace is None:
             # 남은 워크스페이스를 전부 다른 워커가 쥐고 있다
             return None
-        # **빈손이어도 도장을 찍는다.** 이것이 진행을 보장하는 유일한 장치다. 안 찍으면
-        # 그 워크스페이스가 매번 다시 1순위라, 다른 곳에 일감이 있는데도 큐가 멈춘다
+        # 빈손이어도 시각을 기록한다. 안 하면 그 워크스페이스가 매번 다시 1순위가 돼서
+        # 다른 곳에 일감이 있는데도 큐가 멈춘다
         workspace.last_claimed_at = now
         recording = _claim_in_workspace(session, workspace.id)
         if recording is not None:
@@ -314,10 +314,9 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
     summary가 비어 있으면 다음 워커 시작 시 재큐잉돼 다시 시도된다.
     """
     started = datetime.now(UTC)
-    # **일을 시작하기 전에 처리 중임을 커밋한다.** 전사 단계의 transcribing과 같은 역할이다.
-    # 이 커밋이 워크스페이스 행 잠금을 놓아 다른 워커가 그 워크스페이스에 들어올 수 있게
-    # 하고, 라운드로빈 도장도 여기서 확정된다 — 뒤에 두면 엔리처가 죽을 때 롤백에 쓸려
-    # 나가 그 워크스페이스가 계속 1순위로 남는다
+    # 일을 시작하기 전에 처리 중임을 커밋한다. 전사 단계의 transcribing과 같은 역할이다.
+    # 이 커밋이 워크스페이스 행 잠금을 놓고 순환 기록도 확정한다. 뒤에 두면 엔리처가
+    # 죽을 때 롤백에 함께 사라져 그 워크스페이스가 계속 1순위로 남는다
     if recording.status != "summarizing":
         recording.status = "summarizing"
         recording.stage_started_at = started

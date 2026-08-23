@@ -73,7 +73,7 @@ def test_태그_이름은_워크스페이스_안에서만_유일하다():
     assert constraints.get("uq_tags_workspace_name") == ("workspace_id", "name")
 
 
-def test_사용_이력은_녹음_삭제를_살아남는다():
+def test_녹음을_지워도_사용_기록은_남는다():
     """job_log가 녹음을 따라 지워지면 한도를 공짜로 되돌릴 수 있다."""
     job_log = Base.metadata.tables["job_log"]
     assert job_log.columns["recording_id"].nullable

@@ -168,7 +168,7 @@ def test_CSRF_헤더가_없으면_고칠_수_없다(app_client, mine, owner):
 
 
 def test_CSRF_헤더가_없어도_읽기는_된다(app_client, mine, owner):
-    """오디오 태그는 헤더를 실을 수 없다. GET 면제가 재생이 도는 보증이다."""
+    """오디오 태그는 헤더를 실을 수 없다. GET을 면제해야 재생이 된다."""
     login(app_client, owner.email)
     del app_client.headers["x-csrf-token"]
     assert app_client.get(f"/api/recordings/{mine.public_id}").status_code == 200
@@ -396,7 +396,7 @@ def test_행이_위조돼도_남의_파일은_내보내지_않는다(app_client,
     """권한 검사를 통과한 뒤에도 경로가 허용된 뿌리 밖이면 내보내지 않는다.
 
     행이 손상되거나 옛 배치가 남아 있어도 남의 오디오가 나가지 않게 하는 마지막
-    방벽이다. 권한만 보고 경로를 그대로 여는 것이 이 전환 전의 동작이었다.
+    검사다. 권한만 보고 경로를 그대로 여는 것이 이 전환 전의 동작이었다.
     """
     secret = tmp_path / "elsewhere" / "secret.wav"
     secret.parent.mkdir(parents=True, exist_ok=True)

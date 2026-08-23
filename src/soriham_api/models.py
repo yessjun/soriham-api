@@ -133,8 +133,8 @@ class WorkspaceMember(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("workspace_id", "user_id", name="uq_workspace_members_ws_user"),
         CheckConstraint(_in_check("role", WORKSPACE_ROLES), name="workspace_members_role_check"),
-        # 소유자를 별도 컬럼으로 두지 않는 대신 여기서 하나임을 강제한다 —
-        # 표현이 둘이면 반드시 갈라진다
+        # 소유자를 별도 컬럼으로 두지 않고 여기서 하나만 허용한다. 표현이 둘이면
+        # 언젠가 갈라진다
         Index(
             "uq_workspace_members_single_owner",
             "workspace_id",
@@ -469,11 +469,10 @@ class RecordingTag(Base):
 
 
 class JobLog(Base):
-    """처리 단계별 소요 실측 — 대시보드 ETA와 사용량 한도 산정의 근거.
+    """처리 단계별 소요 실측. 대시보드 남은 시간과 사용량 한도 산정의 근거다.
 
-    녹음이 지워져도 남는다. 이 행이 녹음을 따라 사라지면 올리고-전사하고-지우고를
-    반복해 사용량 한도를 공짜로 되돌릴 수 있다. 그래서 워크스페이스를 직접 물고
-    녹음 참조만 끊는다.
+    녹음을 지워도 남는다. 이 행이 녹음을 따라 사라지면 올리고 전사하고 지우기를
+    반복해 사용량 한도를 되돌릴 수 있다. workspace_id를 따로 두고 녹음 참조만 끊는다.
     """
 
     __tablename__ = "job_log"

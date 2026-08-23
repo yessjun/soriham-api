@@ -296,7 +296,7 @@ def test_DB에는_초대_원문_토큰이_남지_않는다(db, workspace):
 
 
 def test_워크스페이스마다_소유자는_하나뿐이다(db, workspace):
-    """부분 유니크 인덱스가 강제한다. 소유자를 별도 컬럼으로 두지 않는 근거다."""
+    """부분 유니크 인덱스가 막는다. 소유자를 별도 컬럼으로 두지 않는 근거다."""
     first = create_user(
         db,
         email="a@example.com",

@@ -30,7 +30,7 @@ def test_업로드본은_자기_워크스페이스_하위여야_한다(tmp_path:
 
 
 def test_남의_워크스페이스_하위는_읽지_않는다(tmp_path: Path):
-    """행이 위조되거나 손상돼도 남의 파일에 닿지 않게 하는 마지막 방벽이다."""
+    """행이 위조되거나 손상돼도 남의 파일에 닿지 않게 하는 마지막 검사다."""
     up = tmp_path / "uploads"
     theirs = write(workspace_upload_dir(up, OTHER_WS) / "2026-08" / "b.wav")
 
