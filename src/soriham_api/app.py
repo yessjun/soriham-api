@@ -479,11 +479,13 @@ def create_app(
         )
         done_audio = sum(x.audio_sec for x in by_status if x.status == "done")
 
-        # 최근 전사 실측 20건으로 처리 배속 추정
+        # 최근 전사 실측 20건으로 처리 배속 추정.
+        # **배속은 워크스페이스로 나누지 않는다.** 이건 이 기계의 특성이지 누구의
+        # 데이터가 아니고, 나누면 방금 만든 워크스페이스는 표본이 없어 남은 시간을
+        # 아예 못 낸다. 대신 무엇이 대기 중인지는 아래에서 자기 것만 센다
         recent = session.execute(
             select(JobLog.audio_sec, JobLog.elapsed_sec)
             .where(
-                JobLog.workspace_id == ws,
                 JobLog.stage == "transcribe",
                 JobLog.status == "done",
                 JobLog.audio_sec.is_not(None),
@@ -498,6 +500,8 @@ def create_app(
         audio_sum = sum(a for a, _ in valid)
         if audio_sum > 0:
             speed_ratio = sum(e for _, e in valid) / audio_sum
+            # 자기 워크스페이스의 대기분만 센다. 전역으로 세면 남의 작업량이 그대로
+            # 드러난다. 앞선 다른 워크스페이스의 대기열이 빠지므로 이 값은 하한이다
             pending_audio = sum(
                 x.audio_sec for x in by_status if x.status in ("pending", "transcribing")
             )
