@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from sqlalchemy import delete, select
 
 from soriham_api.ingest import scan
@@ -115,10 +116,17 @@ def test_process_one_isolates_error_and_continues(db, tmp_path: Path, workspace)
 
 
 def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path, workspace):
+    from datetime import UTC, datetime, timedelta
+
     rows = register(db, tmp_path, ["a.wav", "b.wav"], workspace)
     rows[0].status = "transcribing"  # 세그먼트 없음 -> pending
     rows[1].status = "summarizing"  # 세그먼트까지 저장됨 -> 요약 대기
     rows[1].segments.append(Segment(idx=0, start_sec=0, end_sec=1, text="x"))
+    db.commit()
+    # 최근 기록이 남은 것은 살아 있는 작업으로 본다. 오래된 것만 되돌린다
+    old = datetime.now(UTC) - timedelta(hours=1)
+    for row in rows:
+        row.updated_at = old
     db.commit()
 
     assert recover_in_flight(db) == 2
@@ -283,3 +291,93 @@ def test_처리_중에_녹음이_사라져도_워커가_멎지_않는다(db, tmp
     # 예외가 밖으로 새면 여기서 터진다
     assert process_one(db, VanishingRunner()) is True
     assert db.scalar(select(Recording).where(Recording.id == recording.id)) is None
+
+
+def test_옆_워커가_붙어_있는_작업은_되돌리지_않는다(db, tmp_path: Path, workspace):
+    """무조건 되돌리면 워커 하나를 재시작할 때 옆 워커의 작업을 빼앗는다.
+
+    같은 오디오가 두 번 전사되고, 두 워커가 동시에 세그먼트를 갈아 끼우면 한쪽이
+    완료된 녹음을 error로 덮는다.
+    """
+    rows = register(db, tmp_path, ["a.wav"], workspace)
+    rows[0].status = "transcribing"
+    db.commit()
+
+    assert recover_in_flight(db) == 0
+    db.refresh(rows[0])
+    assert rows[0].status == "transcribing"
+
+
+def test_러너에_못_닿으면_큐로_되돌린다(db, tmp_path: Path, workspace):
+    """러너가 죽어 있는 동안 대기열 전체가 error가 되면 되돌릴 길이 사람 손뿐이다."""
+    from soriham_api.stt_client import RunnerUnavailable
+
+    register(db, tmp_path, ["a.wav"], workspace)
+
+    with pytest.raises(RunnerUnavailable):
+        process_one(db, FakeRunnerClient(error=RunnerUnavailable("연결 거부")))
+
+    row = db.scalars(select(Recording)).one()
+    assert row.status == "pending"
+    assert row.error is None
+
+
+def test_러너_잡_실패는_그_녹음만_error로_둔다(db, tmp_path: Path, workspace):
+    """러너가 처리하고 실패한 것은 이 파일의 문제다. 큐로 되돌릴 이유가 없다."""
+    from soriham_api.stt_client import RunnerJobFailed
+
+    register(db, tmp_path, ["a.wav"], workspace)
+
+    process_one(db, FakeRunnerClient(error=RunnerJobFailed("디코딩 실패")))
+
+    row = db.scalars(select(Recording)).one()
+    assert row.status == "error"
+    assert "디코딩 실패" in row.error
+
+
+def test_실패한_녹음을_다시_큐에_넣는다(db, tmp_path: Path, workspace):
+    """error에서 나가는 길이 삭제뿐이면, 러너가 잠깐 죽은 사이 실패한 수천 건을
+    손으로 지우고 다시 올려야 한다."""
+    from soriham_api.worker import retry_failed
+
+    rows = register(db, tmp_path, ["a.wav", "b.wav", "c.wav"], workspace)
+    for row in rows:
+        row.status = "error"
+        row.error = "stt: 연결 거부"
+    rows[1].segments.append(Segment(idx=0, start_sec=0, end_sec=1, text="x"))
+    rows[2].status = "error"
+    rows[2].summary = "이미 요약까지 끝났다"
+    db.commit()
+
+    assert retry_failed(db) == 3
+
+    for row in rows:
+        db.refresh(row)
+    # 재개 지점은 남아 있는 산출물이 정한다. 이미 치른 GPU 시간을 다시 쓰지 않는다
+    assert rows[0].status == "pending"
+    assert rows[1].status == "enriching"
+    assert rows[2].status == "done"
+    assert rows[0].error is None
+
+
+def test_다시_시도는_워크스페이스로_좁힐_수_있다(db, tmp_path: Path, workspace, other_workspace):
+    from soriham_api.worker import retry_failed
+
+    rows = register(db, tmp_path, ["a.wav"], workspace)
+    rows[0].status = "error"
+    theirs = Recording(
+        workspace_id=other_workspace.id,
+        source="upload",
+        path="/tmp/theirs/x.wav",
+        filename="x.wav",
+        size_bytes=10,
+        partial_hash="theirs-x",
+        status="error",
+    )
+    db.add(theirs)
+    db.commit()
+
+    assert retry_failed(db, workspace_id=workspace.id) == 1
+
+    db.refresh(theirs)
+    assert theirs.status == "error"

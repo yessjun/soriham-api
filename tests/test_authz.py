@@ -73,6 +73,7 @@ def recording_routes(rec: Recording) -> list[tuple[str, str, dict]]:
             {},
         ),
         ("DELETE", f"/api/recordings/{pid}", {}),
+        ("POST", f"/api/recordings/{pid}/retry", {}),
         ("GET", f"/api/recordings/{pid}/shares", {}),
         ("POST", f"/api/recordings/{pid}/shares", {"json": {"email": "x@example.com"}}),
         (
@@ -548,3 +549,19 @@ def test_가입도_같은_검사를_지난다(app_client):
     )
 
     assert resp.status_code == 403
+
+
+def test_실패한_녹음만_다시_시도할_수_있다(app_client, db, mine, owner):
+    login(app_client, owner.email)
+    assert app_client.post(f"/api/recordings/{mine.public_id}/retry").status_code == 422
+
+    mine.status = "error"
+    mine.error = "stt: 연결 거부"
+    db.commit()
+
+    resp = app_client.post(f"/api/recordings/{mine.public_id}/retry")
+
+    assert resp.status_code == 200
+    db.refresh(mine)
+    assert mine.status in ("pending", "enriching")
+    assert mine.error is None

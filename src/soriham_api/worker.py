@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, exists, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -21,7 +21,7 @@ from soriham_api.ingest import resume_status
 from soriham_api.models import JobLog, Recording, Segment, Workspace
 from soriham_api.quota import allows_transcription
 from soriham_api.ratelimit import sweep as sweep_attempts
-from soriham_api.stt_client import RunnerClient
+from soriham_api.stt_client import RunnerClient, RunnerUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,13 @@ CLAIM_TIERS = (CLAIMABLE, (ENRICH_WAITING,))
 # 워크스페이스가 후보에 못 들어와 그 안의 일감이 영원히 안 돈다
 CLAIMABLE_STATUSES = tuple(s for tier in CLAIM_TIERS for s in tier)
 IN_FLIGHT = ("transcribing", "diarizing", "summarizing")
+# 이 시간보다 오래 아무 기록이 없으면 죽은 워커가 남긴 것으로 본다. 화자분리처럼
+# 진행률을 못 내는 단계가 있어 하트비트를 따로 찍는다
+STALE_AFTER = timedelta(minutes=5)
+HEARTBEAT_EVERY = timedelta(seconds=30)
+# 바쁠 때도 정리가 돌게 한다. 유휴에만 걸어 두면 백로그를 도는 몇 주 동안 한 번도
+# 안 돌아 한도 해제가 멈춘다
+MAINTENANCE_EVERY = 20
 
 
 class Enricher(Protocol):
@@ -46,16 +53,51 @@ class Enricher(Protocol):
     def enrich(self, session: Session, recording: Recording) -> None: ...
 
 
-def recover_in_flight(session: Session) -> int:
-    """진행 중 상태로 남은(이전 실행이 중단된) 레코드를 체크포인트 기준으로 되돌린다."""
+def recover_in_flight(session: Session, *, now: datetime | None = None) -> int:
+    """중단된 채 남은 레코드를 체크포인트 기준으로 되돌린다.
+
+    최근에 기록이 남은 것은 건드리지 않는다. 무조건 되돌리면 워커를 하나 재시작할 때
+    옆 워커가 지금 붙어 있는 녹음을 빼앗아 같은 오디오를 두 번 전사한다.
+    """
+    now = now or datetime.now(UTC)
     count = 0
-    for recording in session.scalars(select(Recording).where(Recording.status.in_(IN_FLIGHT))):
+    stale = select(Recording).where(
+        Recording.status.in_(IN_FLIGHT),
+        Recording.updated_at < now - STALE_AFTER,
+    )
+    for recording in session.scalars(stale):
         # 세그먼트까지 저장돼 있으면 엔리치먼트 대기로 돌아간다
         recording.status = resume_status(recording)
         count += 1
         logger.info("재개: %s -> %s", recording.filename, recording.status)
     session.commit()
     return count
+
+
+def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
+    """실패한 녹음을 재개 지점으로 되돌린다.
+
+    error에서 나가는 길이 삭제뿐이면, 러너가 잠깐 죽은 사이 실패한 수천 건을 손으로
+    지우고 다시 올려야 한다. 세그먼트가 남아 있으면 전사를 건너뛴다.
+    """
+    # 재개 지점 판정은 resume_status와 같다. 파이썬으로 돌면 행마다 세그먼트를 통째로
+    # 읽어 오는데, 러너가 몇 시간 죽어 있던 뒤라면 그 대상이 수천 건이다
+    has_segments = exists().where(Segment.recording_id == Recording.id)
+    stmt = update(Recording).where(Recording.status == "error")
+    if workspace_id is not None:
+        stmt = stmt.where(Recording.workspace_id == workspace_id)
+    result = session.execute(
+        stmt.values(
+            status=case(
+                (Recording.summary.is_not(None), "done"),
+                (has_segments, ENRICH_WAITING),
+                else_="pending",
+            ),
+            error=None,
+        )
+    )
+    session.commit()
+    return result.rowcount
 
 
 def requeue_unenriched(session: Session) -> int:
@@ -225,6 +267,18 @@ def _log_stage(
             ledger.commit()
 
 
+def _beat(session: Session, recording: Recording, now: datetime, last: datetime) -> bool:
+    """살아 있다는 표시를 남긴다. 안 남기면 옆 워커가 죽은 작업으로 보고 가져간다.
+
+    화자분리처럼 진행률을 못 내는 단계가 길면 그 사이에 아무 기록도 안 남는다.
+    """
+    if now - last < HEARTBEAT_EVERY:
+        return False
+    recording.updated_at = now
+    session.commit()
+    return True
+
+
 def transcribe_stage(
     session: Session,
     recording: Recording,
@@ -240,20 +294,32 @@ def transcribe_stage(
     recording.progress = None
     session.commit()
 
+    last_beat = started
+
     def report(stage: str | None, ratio: float | None) -> None:
+        nonlocal last_beat
+        now = datetime.now(UTC)
         if stage is not None and stage != "transcribe":
             # 화자분리처럼 비율을 낼 수 없는 단계로 넘어갔다. 마지막 값을 그대로 두면
             # 그 퍼센트에 멈춘 것처럼 보이므로 비우고 경과 시간도 다시 잡는다
             if recording.progress is not None:
                 recording.progress = None
-                recording.stage_started_at = datetime.now(UTC)
+                recording.stage_started_at = now
+                last_beat = now
                 session.commit()
+            else:
+                if _beat(session, recording, now, last_beat):
+                    last_beat = now
             return
-        # 3초 폴링마다 쓰지 않는다 — 1%p 이상 움직였을 때만
-        if ratio is None or (
-            recording.progress is not None and abs(ratio - recording.progress) < 0.01
-        ):
+        # 3초 폴링마다 쓰지 않는다. 1%p 이상 움직였을 때만
+        moved = ratio is not None and (
+            recording.progress is None or abs(ratio - recording.progress) >= 0.01
+        )
+        if not moved:
+            if _beat(session, recording, now, last_beat):
+                last_beat = now
             return
+        last_beat = now
         recording.progress = ratio
         session.commit()
 
@@ -282,6 +348,16 @@ def transcribe_stage(
             )
         recording.language = result.get("language")
         recording.stt_meta = result.get("meta") or {}
+    except RunnerUnavailable as exc:
+        # 러너에 못 닿은 것이지 이 파일의 문제가 아니다. error로 굳히면 러너가 죽어 있는
+        # 동안 대기열 전체가 error가 되고, 되돌릴 길은 사람 손뿐이다
+        session.rollback()
+        recording.status = "pending"
+        recording.progress = None
+        recording.stage_started_at = None
+        session.commit()
+        logger.warning("러너에 닿지 못함, 큐에 되돌림: %s (%s)", recording.filename, exc)
+        raise
     except Exception as exc:
         session.rollback()
         recording.status = "error"
@@ -371,6 +447,10 @@ def process_one(
             transcribe_stage(session, recording, runner, model=model, language=language)
         enrich_stage(session, recording, enricher)
         logger.info("처리 완료: %s", name)
+    except RunnerUnavailable:
+        # 다음 녹음을 바로 집으면 대기열을 통째로 훑으며 같은 실패를 반복한다
+        session.rollback()
+        raise
     except Exception:
         # 에러는 레코드에 격리 기록됐고, 워커는 다음 레코드로 계속
         session.rollback()
@@ -396,15 +476,24 @@ def run_worker(
             requeued = requeue_unenriched(session)
             if requeued:
                 logger.info("요약 없는 완료 %d건을 엔리치먼트 재큐잉", requeued)
+    since_maintenance = 0
     while True:
         try:
             with session_factory() as session:
                 worked = process_one(
                     session, runner, model=model, language=language, enricher=enricher
                 )
-            if not worked:
+            since_maintenance += 1
+            if not worked or since_maintenance >= MAINTENANCE_EVERY:
+                since_maintenance = 0
                 idle_maintenance(session_factory)
+            if not worked:
                 time.sleep(idle_sleep_sec)
+        except RunnerUnavailable as exc:
+            # 러너가 돌아올 때까지 물러선다. 바로 다음 녹음을 집으면 대기열을 훑으며
+            # 같은 실패를 반복한다
+            logger.warning("러너를 기다리는 중 — %.0f초 후 재시도 (%s)", idle_sleep_sec * 4, exc)
+            time.sleep(idle_sleep_sec * 4)
         except KeyboardInterrupt:
             logger.info("워커 종료")
             return
