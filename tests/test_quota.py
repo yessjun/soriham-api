@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from conftest import login, make_settings
 from soriham_api.app import create_app
-from soriham_api.models import JobLog, Recording
+from soriham_api.models import JobLog, Recording, Segment
 from soriham_api.quota import QuotaExceeded, check_minutes, check_storage, measure
 from soriham_api.worker import process_one, release_quota_blocked
 from test_worker import FakeRunnerClient
@@ -115,8 +115,13 @@ def test_창_밖의_이력은_세지_않는다(db, workspace):
 
 
 def test_남의_워크스페이스_사용량은_섞이지_않는다(db, workspace, other_workspace):
+    """시간과 용량 둘 다 갈려야 한다. 한쪽만 보면 남의 파일이 내 한도를 깎는다."""
     log_transcribe(db, other_workspace, minutes=500)
-    assert measure(db, workspace).used_minutes == pytest.approx(0.0)
+    make_recording(db, other_workspace, size=9_000_000, name="theirs.wav")
+
+    usage = measure(db, workspace)
+    assert usage.used_minutes == pytest.approx(0.0)
+    assert usage.used_bytes == 0
 
 
 def test_사라진_녹음과_중복은_자리를_차지하지_않는다(db, workspace):
@@ -231,3 +236,72 @@ def test_워커가_유휴일_때_해제를_본다(engine, db, workspace, monkeyp
     worker.run_worker(sm(bind=engine), FakeRunnerClient(), idle_sleep_sec=0.01)
 
     assert called == [True]
+
+
+def test_전사가_끝난_녹음은_한도로_막지_않는다(db, workspace):
+    """엔리치먼트만 남은 녹음은 GPU 비용이 이미 치러졌다.
+
+    여기서 막으면 요약이 영영 안 붙고, 해제가 pending으로 되돌리면 같은 오디오를
+    다시 전사해 한도를 두 번 깎는다.
+    """
+    workspace.quota_minutes = 100
+    db.commit()
+    recording = make_recording(db, workspace, duration=3600.0)
+    recording.status = "enriching"
+    db.add(Segment(recording_id=recording.id, idx=0, start_sec=0.0, end_sec=1.0, text="안녕"))
+    db.commit()
+    log_transcribe(db, workspace, minutes=95)
+
+    runner = FakeRunnerClient()
+    process_one(db, runner, enricher=None)
+
+    assert runner.calls == []
+    assert recording.status != "quota_blocked"
+
+
+def test_해제는_재개_지점으로_되돌린다(db, workspace):
+    """pending으로 일괄 되돌리면 이미 전사된 녹음이 다시 전사된다."""
+    workspace.quota_minutes = 10
+    db.commit()
+    recording = make_recording(db, workspace, duration=3600.0)
+    recording.status = "quota_blocked"
+    db.add(Segment(recording_id=recording.id, idx=0, start_sec=0.0, end_sec=1.0, text="안녕"))
+    db.commit()
+
+    workspace.quota_minutes = 1000
+    db.commit()
+    assert release_quota_blocked(db) == 1
+
+    db.refresh(recording)
+    assert recording.status == "enriching"
+
+
+def test_업로드가_시간_한도에_걸리면_받지_않는다(client, db, workspace, monkeypatch):
+    """워커가 어차피 막지만, 올린 뒤에 보류되는 것보다 그 자리에서 거절하는 편이 낫다."""
+    from soriham_api import app as app_module
+
+    workspace.quota_minutes = 1
+    db.commit()
+    monkeypatch.setattr(app_module, "probe_duration", lambda _: 3600.0)
+
+    resp = client.post(
+        f"/api/workspaces/{workspace.public_id}/recordings",
+        files={"file": ("20260817_100000.wav", WAV, "audio/wav")},
+    )
+
+    assert resp.status_code == 413
+    assert "전사 시간" in resp.json()["detail"]
+    assert db.scalar(select(Recording)) is None
+
+
+def test_한도로_보류된_녹음은_완료_비율의_분모에서_빠진다(client, db, workspace):
+    """처리 대상이 아닌 것을 분모에 넣으면 완료 비율이 영원히 100%에 못 닿는다."""
+    done = make_recording(db, workspace, size=10, duration=600.0, name="done.wav")
+    done.status = "done"
+    blocked = make_recording(db, workspace, size=10, duration=600.0, name="blocked.wav")
+    blocked.status = "quota_blocked"
+    db.commit()
+
+    body = client.get(f"/api/workspaces/{workspace.public_id}/stats").json()
+
+    assert body["done_ratio"] == pytest.approx(1.0)
