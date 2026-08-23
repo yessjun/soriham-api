@@ -39,6 +39,7 @@ from .permissions import (
 from .ratelimit import PER_SOURCE, PER_TARGET, source_key, target_key
 from .serializers import eta_sec, recording_summary, segment_out, tag_out
 from .sharing import (
+    LINK_PASSWORD_MIN,
     LinkInvalid,
     ShareInvalid,
     create_link,
@@ -166,6 +167,8 @@ def register(app: FastAPI, deps: Deps) -> None:
         if password and not password.strip():
             # 비밀번호를 걸었다고 믿는데 실제로는 안 걸린 링크가 나간다
             raise HTTPException(422, "비밀번호가 비어 있습니다")
+        if password and len(password) < LINK_PASSWORD_MIN:
+            raise HTTPException(422, f"비밀번호는 {LINK_PASSWORD_MIN}자 이상이어야 합니다")
         try:
             issued = create_link(
                 session,
@@ -288,6 +291,7 @@ def register(app: FastAPI, deps: Deps) -> None:
         request: Request,
         response: Response,
         session: Session = Depends(db),
+        _: None = Depends(deps.require_known_origin),
     ) -> Response:
         """비밀번호를 확인하고 이 링크 경로로 범위를 좁힌 쿠키를 준다.
 

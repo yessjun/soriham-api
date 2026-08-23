@@ -211,7 +211,7 @@ def test_링크_비밀번호도_두드리면_막힌다(client, db, workspace, ow
     db.commit()
     login(client, owner.email)
     token = client.post(
-        f"/api/recordings/{rec.public_id}/links", json={"password": "열려라"}
+        f"/api/recordings/{rec.public_id}/links", json={"password": "열려라 참깨"}
     ).json()["token"]
 
     codes = [

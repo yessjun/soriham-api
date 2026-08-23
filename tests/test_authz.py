@@ -504,3 +504,47 @@ def test_계정_상태마다_다른_문구를_준다(app_client, db, workspace, 
     assert detail.status_code == listing.status_code == 403
     assert detail.json()["detail"] == "사용이 중지된 계정입니다"
     assert listing.json()["detail"] == detail.json()["detail"]
+
+
+def test_남의_페이지에서_보낸_로그인은_거절한다(app_client, owner):
+    """로그인은 세션이 생기기 전이라 CSRF 토큰을 요구할 수 없다.
+
+    그 창을 열어 두면 남의 페이지가 폼을 자동 제출해 피해자 브라우저를 공격자 계정으로
+    로그인시킬 수 있다. 그다음 올리는 녹음이 공격자 워크스페이스로 들어간다.
+    """
+    resp = app_client.post(
+        "/api/auth/login",
+        json={"email": owner.email, "password": TEST_PASSWORD},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403
+
+
+def test_허용된_곳에서_보낸_로그인은_받는다(app_client, owner):
+    resp = app_client.post(
+        "/api/auth/login",
+        json={"email": owner.email, "password": TEST_PASSWORD},
+        headers={"origin": "http://localhost:5174"},
+    )
+
+    assert resp.status_code == 200
+
+
+def test_Origin이_없는_요청은_그대로_받는다(app_client, owner):
+    """브라우저는 이 요청에 Origin을 반드시 싣는다. 안 싣는 쪽은 curl이나 CLI다."""
+    resp = app_client.post(
+        "/api/auth/login", json={"email": owner.email, "password": TEST_PASSWORD}
+    )
+
+    assert resp.status_code == 200
+
+
+def test_가입도_같은_검사를_지난다(app_client):
+    resp = app_client.post(
+        "/api/auth/signup",
+        json={"email": "new@example.com", "password": "암구호", "display_name": "새"},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403

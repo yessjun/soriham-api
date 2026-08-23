@@ -27,6 +27,9 @@ from .models import (
 from .tenancy import MemberInvalid, valid_email
 
 LINK_DEFAULT_DAYS = 30
+# 링크 비밀번호의 최소 길이. 잠금 해제는 출처와 링크의 짝으로 세므로 IP를 바꿔 가며
+# 두드리면 제한을 우회할 수 있다. 짧은 비밀번호는 그 앞에서 버티지 못한다
+LINK_PASSWORD_MIN = 6
 # 사람이 손으로 넣는 값이라 상한을 둔다. 무기한은 일수가 아니라 None으로 말한다
 LINK_MAX_DAYS = 3650
 
