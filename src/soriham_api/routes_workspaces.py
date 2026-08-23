@@ -26,6 +26,7 @@ from .api_schemas import (
 from .deps import Deps, WorkspaceContext
 from .models import Invite, User, Workspace, WorkspaceMember
 from .permissions import Perm
+from .routes_auth import workspace_ref
 from .tenancy import (
     InviteInvalid,
     MemberInvalid,
@@ -58,6 +59,14 @@ def register(app: FastAPI, deps: Deps) -> None:
             raise HTTPException(404, "구성원이 없습니다")
         return user
 
+    def _member_out(member: WorkspaceMember, user: User) -> MemberOut:
+        return MemberOut(
+            user=UserOut(id=user.public_id, email=user.email, name=user.display_name),
+            role=member.role,
+            status=user.status,
+            joined_at=member.created_at,
+        )
+
     def _invite_out(invite: Invite) -> InviteOut:
         return InviteOut(
             id=invite.public_id,
@@ -75,14 +84,7 @@ def register(app: FastAPI, deps: Deps) -> None:
         session: Session = Depends(db),
     ) -> list[MemberOut]:
         """구성원 목록. 같은 워크스페이스 사람끼리는 서로를 안다."""
-        return [
-            MemberOut(
-                user=UserOut(id=user.public_id, email=user.email, name=user.display_name),
-                role=member.role,
-                joined_at=member.created_at,
-            )
-            for member, user in list_members(session, ctx.workspace)
-        ]
+        return [_member_out(member, user) for member, user in list_members(session, ctx.workspace)]
 
     @app.put("/api/workspaces/{workspace_id}/members/{user_public_id}", response_model=MemberOut)
     def change_role(
@@ -99,11 +101,7 @@ def register(app: FastAPI, deps: Deps) -> None:
         except MemberInvalid as exc:
             raise HTTPException(422, str(exc)) from None
         session.commit()
-        return MemberOut(
-            user=UserOut(id=target.public_id, email=target.email, name=target.display_name),
-            role=member.role,
-            joined_at=member.created_at,
-        )
+        return _member_out(member, target)
 
     @app.delete("/api/workspaces/{workspace_id}/members/{user_public_id}", status_code=204)
     def drop_member(
@@ -206,12 +204,7 @@ def register(app: FastAPI, deps: Deps) -> None:
                 WorkspaceMember.user_id == user.id,
             )
         )
-        return WorkspaceRef(
-            id=workspace.public_id,
-            name=workspace.name,
-            slug=workspace.slug,
-            role=role or "member",
-        )
+        return workspace_ref(workspace, role or "member")
 
     @app.post("/api/workspaces", response_model=WorkspaceRef, status_code=201)
     def new_workspace(
@@ -242,6 +235,4 @@ def register(app: FastAPI, deps: Deps) -> None:
         )
         add_member(session, workspace, admin, "owner")
         session.commit()
-        return WorkspaceRef(
-            id=workspace.public_id, name=workspace.name, slug=workspace.slug, role="owner"
-        )
+        return workspace_ref(workspace, "owner")

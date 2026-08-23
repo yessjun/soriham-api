@@ -32,23 +32,38 @@ def _user_out(user: User) -> UserOut:
     return UserOut(id=user.public_id, email=user.email, name=user.display_name)
 
 
-def _capabilities(session: Session, user: User) -> list[str]:
-    """콘솔이 무엇을 그릴지 정하는 값. 역할 산술을 클라이언트에서 다시 하지 않게 한다."""
+# 워크스페이스 역할이 그 안에서 무엇을 할 수 있는지. 콘솔이 역할 문자열로 다시
+# 계산하면 서버 규칙과 어긋난다
+ROLE_CAPABILITIES: dict[str, list[str]] = {
+    "owner": ["upload", "delete", "share", "invite", "stats", "manage_members"],
+    "admin": ["upload", "delete", "share", "invite", "stats", "manage_members"],
+    "member": ["upload", "delete", "share"],
+    "viewer": [],
+}
+
+
+def _account_capabilities(user: User) -> list[str]:
+    """계정 단위로 할 수 있는 것. 워크스페이스 안에서 할 수 있는 것은 WorkspaceRef가 준다.
+
+    예전에는 여기서 invite와 stats도 줬는데, 모든 활성 사용자가 자기 개인 워크스페이스의
+    owner라서 항상 켜져 있었다. 팀 워크스페이스에 member로만 속한 사람이 통계 버튼을
+    보고 눌렀다가 403을 받는 상태였다.
+    """
     if user.status != "active":
         return []
-    caps = ["upload"]
     if user.is_service_admin:
-        caps += ["admin", "stats", "create_workspace"]
-        return caps
-    elevated = session.scalar(
-        select(func.count(WorkspaceMember.id)).where(
-            WorkspaceMember.user_id == user.id,
-            WorkspaceMember.role.in_(("owner", "admin")),
-        )
+        return ["admin", "create_workspace"]
+    return []
+
+
+def workspace_ref(workspace: Workspace, role: str) -> WorkspaceRef:
+    return WorkspaceRef(
+        id=workspace.public_id,
+        name=workspace.name,
+        slug=workspace.slug,
+        role=role,
+        capabilities=ROLE_CAPABILITIES.get(role, []),
     )
-    if elevated:
-        caps += ["invite", "stats"]
-    return caps
 
 
 def _me(session: Session, user: User) -> MeOut:
@@ -71,12 +86,9 @@ def _me(session: Session, user: User) -> MeOut:
     return MeOut(
         user=_user_out(user),
         status=user.status,
-        workspaces=[
-            WorkspaceRef(id=w.public_id, name=w.name, slug=w.slug, role=roles.get(w.id, "member"))
-            for w in workspaces
-        ],
+        workspaces=[workspace_ref(w, roles.get(w.id, "member")) for w in workspaces],
         default_workspace_id=default.public_id if default is not None else None,
-        capabilities=_capabilities(session, user),
+        capabilities=_account_capabilities(user),
         pending_user_count=pending,
     )
 

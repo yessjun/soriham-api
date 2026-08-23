@@ -11,13 +11,14 @@ from dataclasses import replace
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, aliased, selectinload
 
 from . import auth
 from .api_schemas import (
     IssuedShareLinkOut,
-    RecordingList,
     SharedRecordingOut,
+    SharedWithMe,
+    SharedWithMeList,
     ShareIn,
     ShareLinkIn,
     ShareLinkOut,
@@ -186,33 +187,44 @@ def register(app: FastAPI, deps: Deps) -> None:
         session.commit()
         return Response(status_code=204)
 
-    @app.get("/api/shared-with-me", response_model=RecordingList)
+    @app.get("/api/shared-with-me", response_model=SharedWithMeList)
     def shared_with_me(
         user: User = Depends(deps.require_active),
         session: Session = Depends(db),
         limit: int = Query(50, le=200),
         offset: int = 0,
-    ) -> RecordingList:
+    ) -> SharedWithMeList:
         """워크스페이스 밖에서 나에게 열린 녹음들.
 
-        목록과 검색은 워크스페이스 필터만 걸므로(총 개수와 태그 필터가 어그러진다)
-        이 화면이 없으면 사용자 지정 공유를 받은 사람은 그 녹음에 도달할 길이 없다.
+        목록과 검색은 워크스페이스 필터만 걸어서 여기 안 나오면 공유받은 사람이 그
+        녹음에 닿을 길이 없다. 권한과 공유한 사람을 함께 준다 — 없으면 항목마다 상세를
+        다시 불러야 알 수 있다.
         """
-        scoped = (
-            select(Recording.id)
-            .join(RecordingShare, RecordingShare.recording_id == Recording.id)
-            .where(RecordingShare.user_id == user.id)
+        sharer = aliased(User)
+        total = session.scalar(
+            select(func.count(RecordingShare.id)).where(RecordingShare.user_id == user.id)
         )
-        total = session.scalar(select(func.count()).select_from(scoped.subquery()))
-        rows = session.scalars(
-            select(Recording)
+        rows = session.execute(
+            select(Recording, RecordingShare.permission, sharer.display_name)
+            .join(RecordingShare, RecordingShare.recording_id == Recording.id)
+            .outerjoin(sharer, sharer.id == RecordingShare.created_by_user_id)
             .options(selectinload(Recording.tags))
-            .where(Recording.id.in_(scoped))
+            .where(RecordingShare.user_id == user.id)
             .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
             .limit(limit)
             .offset(offset)
         ).all()
-        return RecordingList(items=[recording_summary(r) for r in rows], total=total or 0)
+        return SharedWithMeList(
+            items=[
+                SharedWithMe(
+                    **recording_summary(rec).model_dump(),
+                    permission=permission,
+                    shared_by=shared_by,
+                )
+                for rec, permission, shared_by in rows
+            ],
+            total=total or 0,
+        )
 
     # --- 링크로 여는 공개 표면 -------------------------------------------------
 

@@ -218,7 +218,13 @@ def create_app(
                     name,
                     taken=registered,
                 )
-                recording = ingest_file(session, dest, workspace_id=workspace.id, source="upload")
+                recording = ingest_file(
+                    session,
+                    dest,
+                    workspace_id=workspace.id,
+                    source="upload",
+                    created_by_user_id=user.id,
+                )
                 if recording is None:  # registered()가 걸렀어야 하는 경우
                     raise HTTPException(500, "업로드 경로를 정하지 못했습니다")
                 session.commit()
@@ -246,6 +252,7 @@ def create_app(
         return RecordingDetail(
             **_summary(recording).model_dump(),
             can_edit=perm >= Perm.EDIT,
+            can_manage=perm >= Perm.MANAGE,
             share_state=state,
             error=recording.error,
             stt_meta=recording.stt_meta,
