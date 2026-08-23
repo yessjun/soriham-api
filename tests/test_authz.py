@@ -24,8 +24,11 @@ from test_worker import FakeRunnerClient
 
 
 @pytest.fixture
-def app_client(engine):
-    app = create_app(settings=make_settings(), session_factory=sessionmaker(bind=engine))
+def app_client(engine, tmp_path: Path):
+    app = create_app(
+        settings=make_settings(audio_dirs=(tmp_path / "rec",)),
+        session_factory=sessionmaker(bind=engine),
+    )
     return TestClient(app)
 
 
@@ -362,3 +365,28 @@ def test_승인_대기_중에는_있는_것과_없는_것이_같은_답이다(ap
     fake = app_client.get("/api/recordings/00000000-0000-0000-0000-000000000000")
     assert real.status_code == fake.status_code == 403
     assert real.json()["detail"] == fake.json()["detail"]
+
+
+def test_행이_위조돼도_남의_파일은_내보내지_않는다(app_client, db, mine, owner, tmp_path):
+    """권한 검사를 통과한 뒤에도 경로가 허용된 뿌리 밖이면 내보내지 않는다.
+
+    행이 손상되거나 옛 배치가 남아 있어도 남의 오디오가 나가지 않게 하는 마지막
+    방벽이다. 권한만 보고 경로를 그대로 여는 것이 이 전환 전의 동작이었다.
+    """
+    secret = tmp_path / "elsewhere" / "secret.wav"
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    secret.write_bytes(b"RIFF" + b"\x00" * 64)
+    mine.path = str(secret)
+    db.commit()
+
+    login(app_client, owner.email)
+    forged = app_client.get(f"/api/recordings/{mine.public_id}/audio")
+    assert forged.status_code == 404
+
+    # 뿌리 밖인 것과 파일이 없는 것은 같은 답이어야 한다. 다르면 어떤 경로가
+    # 존재하는지 알려주는 셈이다
+    mine.path = str(tmp_path / "rec" / "사라진.wav")
+    db.commit()
+    missing = app_client.get(f"/api/recordings/{mine.public_id}/audio")
+    assert missing.status_code == 404
+    assert forged.json()["detail"] == missing.json()["detail"]

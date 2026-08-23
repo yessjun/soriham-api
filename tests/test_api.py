@@ -17,8 +17,13 @@ from test_worker import RESULT, FakeRunnerClient
 
 
 @pytest.fixture
-def client(engine, db, owner):
-    app = create_app(settings=make_settings(), session_factory=sessionmaker(bind=engine))
+def client(engine, db, owner, tmp_path: Path):
+    # 스캔본의 오디오를 내보내려면 감시 폴더가 설정에 있어야 한다 — 없으면 경로
+    # 봉쇄 검사가 막는다
+    app = create_app(
+        settings=make_settings(audio_dirs=(tmp_path / "rec",)),
+        session_factory=sessionmaker(bind=engine),
+    )
     c = TestClient(app)
     login(c, owner.email)
     return c
