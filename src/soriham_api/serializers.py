@@ -50,6 +50,8 @@ def recording_summary(recording: Recording) -> RecordingSummary:
         summary=recording.summary,
         recorded_at=recording.recorded_at,
         duration_sec=recording.duration_sec,
+        source=recording.source,
+        size_bytes=recording.size_bytes,
         status=recording.status,
         language=recording.language,
         tags=[tag_out(t) for t in recording.tags],

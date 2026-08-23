@@ -21,6 +21,11 @@ class RecordingSummary(BaseModel):
     summary: str | None
     recorded_at: datetime | None
     duration_sec: float | None
+    # upload | scan. 삭제 확인 문구가 갈린다 — 업로드본은 원본 파일까지 지우고
+    # 스캔본은 목록에서만 빠진다
+    source: str
+    # 저장 용량이 찼을 때 무엇을 지울지 고르려면 크기가 보여야 한다
+    size_bytes: int
     status: str
     language: str | None
     tags: list[TagOut]
@@ -52,8 +57,10 @@ class ShareStateOut(BaseModel):
 
 
 class RecordingDetail(RecordingSummary):
-    # 화면이 편집 어포던스를 그릴지. 콘솔이 역할 산술을 다시 하면 두 규칙이 어긋난다
+    # 화면이 어떤 컨트롤을 그릴지. 콘솔이 역할 산술을 다시 하면 두 규칙이 어긋난다
     can_edit: bool = False
+    # 삭제와 공유 관리. share_state가 채워졌는지로 추론하지 않게 따로 준다
+    can_manage: bool = False
     # 공유를 관리할 권한이 없으면 비어 있다
     share_state: ShareStateOut | None = None
     error: str | None
@@ -109,6 +116,8 @@ class WorkspaceRef(BaseModel):
     name: str
     slug: str
     role: str
+    # 이 워크스페이스에서 할 수 있는 것. 역할 문자열로 화면이 다시 계산하지 않게 한다
+    capabilities: list[str] = []
 
 
 class MeOut(BaseModel):
@@ -149,6 +158,8 @@ class PendingUserOut(BaseModel):
 class MemberOut(BaseModel):
     user: UserOut
     role: str
+    # 승인 대기나 중지된 구성원이 정상 구성원과 같아 보이면 안 된다
+    status: str
     joined_at: datetime
 
 
@@ -240,6 +251,18 @@ class ShareLinkOut(BaseModel):
 class IssuedShareLinkOut(ShareLinkOut):
     # 원문 토큰은 발급 응답에만 실린다. 저장하는 것은 해시뿐이다
     token: str
+
+
+class SharedWithMe(RecordingSummary):
+    """나에게 공유된 녹음. 목록에서 권한과 공유한 사람이 바로 보여야 한다."""
+
+    permission: str
+    shared_by: str | None
+
+
+class SharedWithMeList(BaseModel):
+    items: list[SharedWithMe]
+    total: int
 
 
 class SharePanelOut(BaseModel):
