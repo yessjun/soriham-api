@@ -19,6 +19,20 @@ def main(argv: list[str] | None = None) -> int:
     create_ws.add_argument("--slug", required=True, help="소문자·숫자·하이픈")
     create_ws.add_argument("--name", required=True)
     create_ws.add_argument("--kind", choices=("personal", "team"), default="team")
+    boot = sub.add_parser("bootstrap", help="첫 운영자와 워크스페이스를 만든다")
+    boot.add_argument("--email", required=True)
+    boot.add_argument("--name", required=True, help="표시 이름")
+    boot.add_argument("--workspace-slug", required=True)
+    boot.add_argument("--workspace-name", required=True)
+    approve_p = sub.add_parser("approve", help="가입 신청을 승인하거나 거절한다")
+    approve_p.add_argument("--email", required=True)
+    approve_p.add_argument("--reject", action="store_true", help="승인 대신 거절")
+    pending_p = sub.add_parser("pending", help="승인 대기 중인 신청을 나열한다")
+    pending_p.add_argument("--limit", type=int, default=50)
+    quota_p = sub.add_parser("quota", help="워크스페이스 사용량 한도를 정한다")
+    quota_p.add_argument("--workspace", required=True, help="슬러그")
+    quota_p.add_argument("--minutes", help="전사 시간 한도(분). unlimited면 무제한")
+    quota_p.add_argument("--gb", help="저장 용량 한도(GB). unlimited면 무제한")
     serve = sub.add_parser("serve", help="REST API 서버 실행")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8200)
@@ -31,6 +45,86 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("scan", "watch") and not settings.default_workspace:
         parser.error("DEFAULT_WORKSPACE가 설정돼 있지 않습니다 (.env 확인)")
     session_factory = make_session_factory(settings)
+
+    if args.command == "bootstrap":
+        from soriham_api.tenancy import bootstrap
+
+        password = _read_password()
+        with session_factory() as session:
+            try:
+                user, workspace, created = bootstrap(
+                    session,
+                    email=args.email,
+                    password=password,
+                    display_name=args.name,
+                    workspace_slug=args.workspace_slug,
+                    workspace_name=args.workspace_name,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            session.commit()
+            if created:
+                print(f"운영자 {user.email} / 워크스페이스 {workspace.slug} 만들었습니다")
+            else:
+                print(f"이미 있습니다: {user.email}")
+        return 0
+
+    if args.command == "pending":
+        from sqlalchemy import select
+
+        from soriham_api.models import User
+
+        with session_factory() as session:
+            rows = session.scalars(
+                select(User)
+                .where(User.status == "pending")
+                .order_by(User.created_at)
+                .limit(args.limit)
+            ).all()
+        if not rows:
+            print("승인 대기 중인 신청이 없습니다")
+            return 0
+        for row in rows:
+            note = f" — {row.signup_note}" if row.signup_note else ""
+            print(f"{row.created_at:%Y-%m-%d %H:%M}  {row.email}  {row.display_name}{note}")
+        return 0
+
+    if args.command == "approve":
+        from soriham_api.tenancy import approve, find_user, reject
+
+        with session_factory() as session:
+            user = find_user(session, args.email)
+            if user is None:
+                parser.error(f"그런 계정이 없습니다: {args.email}")
+            if args.reject:
+                reject(session, user)
+                session.commit()
+                print(f"거절했습니다: {user.email}")
+            else:
+                approve(session, user)
+                session.commit()
+                print(f"승인했습니다: {user.email}")
+        return 0
+
+    if args.command == "quota":
+        from soriham_api.tenancy import WorkspaceNotFound, get_workspace
+
+        with session_factory() as session:
+            try:
+                workspace = get_workspace(session, args.workspace)
+            except WorkspaceNotFound as exc:
+                parser.error(str(exc))
+            if args.minutes is not None:
+                workspace.quota_minutes = _quota_value(parser, args.minutes)
+            if args.gb is not None:
+                gb = _quota_value(parser, args.gb)
+                workspace.quota_bytes = None if gb is None else gb * 1024 * 1024 * 1024
+            session.commit()
+            print(
+                f"{workspace.slug}: 전사 {_show_minutes(workspace.quota_minutes)}, "
+                f"저장 {_show_bytes(workspace.quota_bytes)}"
+            )
+        return 0
 
     if args.command == "create-workspace":
         from soriham_api.tenancy import create_workspace, find_workspace
@@ -101,6 +195,41 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     return 1
+
+
+def _read_password() -> str:
+    """비밀번호는 인자로 받지 않는다 — 셸 기록과 프로세스 목록에 남는다."""
+    import getpass
+
+    first = getpass.getpass("비밀번호: ")
+    if not first:
+        raise SystemExit("비밀번호가 비어 있습니다")
+    if first != getpass.getpass("다시 한 번: "):
+        raise SystemExit("두 번 입력이 다릅니다")
+    return first
+
+
+def _quota_value(parser: argparse.ArgumentParser, raw: str) -> int | None:
+    if raw.lower() in ("unlimited", "none", ""):
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        parser.error(f"숫자나 unlimited여야 합니다: {raw}")
+    if value < 0:
+        parser.error("한도는 음수일 수 없습니다")
+    return value
+
+
+def _show_minutes(value: int | None) -> str:
+    return "무제한" if value is None else f"{value}분"
+
+
+def _show_bytes(value: int | None) -> str:
+    if value is None:
+        return "무제한"
+    gb = value / (1024 * 1024 * 1024)
+    return f"{gb:.0f}GB" if gb >= 1 else f"{value}바이트"
 
 
 if __name__ == "__main__":
