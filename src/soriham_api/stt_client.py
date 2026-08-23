@@ -11,6 +11,10 @@ from typing import Any
 import httpx
 
 
+class RunnerUnavailable(Exception):
+    """러너에 닿지 못했다. 이 파일의 문제가 아니라 러너 쪽 문제다."""
+
+
 class RunnerJobLost(Exception):
     """러너가 잡을 잊었다(재시작 등) — 재제출 대상."""
 
@@ -56,6 +60,14 @@ class RunnerClient:
             data["model"] = model
         if language:
             data["language"] = language
+        try:
+            return self._submit(data, audio_path)
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            # 못 닿은 것과 이 파일이 문제인 것은 다르다. 섞으면 러너가 죽어 있는 동안
+            # 대기열 전체가 error로 바뀐다
+            raise RunnerUnavailable(str(exc)) from exc
+
+    def _submit(self, data: dict[str, Any], audio_path: Path) -> str:
         with self._client() as client:
             if self.upload:
                 with audio_path.open("rb") as f:
@@ -81,7 +93,7 @@ class RunnerClient:
                     # 장시간 변환 중 폴링 1회 실패로 잡을 버리지 않는다
                     errors += 1
                     if errors > 5:
-                        raise
+                        raise RunnerUnavailable(f"러너 응답 없음: {job_id}") from None
                     time.sleep(self.poll_interval_sec)
                     continue
                 errors = 0

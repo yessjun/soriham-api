@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     approve_p.add_argument("--reject", action="store_true", help="승인 대신 거절")
     pending_p = sub.add_parser("pending", help="승인 대기 중인 신청을 나열한다")
     pending_p.add_argument("--limit", type=int, default=50)
+    retry_p = sub.add_parser("retry", help="실패한 녹음을 다시 큐에 넣는다")
+    retry_p.add_argument("--workspace", help="슬러그. 비우면 전체")
     reset_p = sub.add_parser("reset-password", help="계정의 비밀번호를 다시 정한다")
     reset_p.add_argument("--email", required=True)
     quota_p = sub.add_parser("quota", help="워크스페이스 사용량 한도를 정한다")
@@ -112,6 +114,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 session.commit()
                 print(f"승인했습니다: {user.email}")
+        return 0
+
+    if args.command == "retry":
+        from soriham_api.tenancy import WorkspaceNotFound, get_workspace
+        from soriham_api.worker import retry_failed
+
+        with session_factory() as session:
+            workspace_id = None
+            if args.workspace:
+                try:
+                    workspace_id = get_workspace(session, args.workspace).id
+                except WorkspaceNotFound as exc:
+                    parser.error(str(exc))
+            count = retry_failed(session, workspace_id=workspace_id)
+        print(f"{count}건을 다시 큐에 넣었습니다")
         return 0
 
     if args.command == "reset-password":

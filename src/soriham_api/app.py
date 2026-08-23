@@ -38,6 +38,7 @@ from soriham_api.ingest import (
     ingest_file,
     partial_hash,
     probe_duration,
+    resume_status,
 )
 from soriham_api.media import range_response
 from soriham_api.models import JobLog, Recording, SpeakerName, Tag, User, Workspace
@@ -362,6 +363,24 @@ def create_app(
         session.delete(recording)
         session.commit()
         return Response(status_code=204)
+
+    @app.post("/api/recordings/{public_id}/retry", response_model=RecordingSummary)
+    def retry_recording(
+        recording: Recording = Depends(manageable),
+        session: Session = Depends(db),
+        _: None = Depends(deps.require_csrf),
+    ) -> RecordingSummary:
+        """실패한 녹음을 다시 큐에 넣는다.
+
+        error에서 나가는 길이 삭제뿐이면 러너가 잠깐 죽은 사이 실패한 것을 손으로
+        지우고 다시 올려야 한다. 세그먼트가 남아 있으면 전사를 건너뛴다.
+        """
+        if recording.status != "error":
+            raise HTTPException(422, "실패한 녹음만 다시 시도할 수 있습니다")
+        recording.status = resume_status(recording)
+        recording.error = None
+        session.commit()
+        return _summary(recording)
 
     @app.post("/api/recordings/{public_id}/tags", response_model=list[TagOut])
     def add_tag(
