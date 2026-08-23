@@ -101,19 +101,22 @@ def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
 
 
 def requeue_unenriched(session: Session) -> int:
-    """요약 없이 done인 레코드를 엔리치먼트 대상으로 되돌린다(백필·재시도)."""
-    count = 0
-    for recording in session.scalars(
-        select(Recording).where(
+    """요약 없이 done인 레코드를 엔리치먼트 대상으로 되돌린다(백필·재시도).
+
+    세그먼트가 있는지만 알면 되므로 SQL로 묻는다. 파이썬으로 돌면 행마다 세그먼트를
+    통째로 읽어 오는데, 백필 대상은 백로그 전체일 수 있다.
+    """
+    result = session.execute(
+        update(Recording)
+        .where(
             Recording.status == "done",
             Recording.summary.is_(None),
+            exists().where(Segment.recording_id == Recording.id),
         )
-    ):
-        if recording.segments:
-            recording.status = ENRICH_WAITING
-            count += 1
+        .values(status=ENRICH_WAITING)
+    )
     session.commit()
-    return count
+    return result.rowcount
 
 
 def idle_maintenance(session_factory: sessionmaker[Session]) -> None:

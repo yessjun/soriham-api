@@ -565,3 +565,27 @@ def test_실패한_녹음만_다시_시도할_수_있다(app_client, db, mine, o
     db.refresh(mine)
     assert mine.status in ("pending", "enriching")
     assert mine.error is None
+
+
+def test_세그먼트는_상세에서만_읽는다(app_client, db, mine, owner, engine):
+    """두 시간짜리 회의는 세그먼트가 수천 줄이다. 제목을 고치거나 오디오를 받을 때까지
+    그걸 끌어오면 그만큼이 통째로 헛일이다."""
+    from sqlalchemy import event
+
+    assert mine.segments, "픽스처가 세그먼트를 남겨야 이 시험이 의미가 있다"
+    login(app_client, owner.email)
+
+    hits: list[str] = []
+
+    def watch(conn, cursor, statement, params, context, executemany):
+        if "FROM segments" in statement:
+            hits.append(statement)
+
+    event.listen(engine, "before_cursor_execute", watch)
+    try:
+        app_client.patch(f"/api/recordings/{mine.public_id}", json={"title": "새 제목"})
+        assert hits == []
+        app_client.get(f"/api/recordings/{mine.public_id}")
+        assert hits != []
+    finally:
+        event.remove(engine, "before_cursor_execute", watch)

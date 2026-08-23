@@ -116,6 +116,8 @@ def create_app(
     db = deps.db
     # 권한 등급마다 한 번씩만 만든다. 경로 파라미터로 녹음을 얻는 길은 이 둘뿐이다
     viewable = deps.recording_at(Perm.VIEW)
+    # 상세만 세그먼트를 함께 읽는다
+    readable_detail = deps.recording_at(Perm.VIEW, with_segments=True)
     editable = deps.recording_at(Perm.EDIT)
     manageable = deps.recording_at(Perm.MANAGE)
     register_auth_routes(app, deps)
@@ -240,7 +242,7 @@ def create_app(
 
     @app.get("/api/recordings/{public_id}", response_model=RecordingDetail)
     def recording_detail(
-        recording: Recording = Depends(viewable),
+        recording: Recording = Depends(readable_detail),
         principal: Principal = Depends(deps.principal),
         session: Session = Depends(db),
     ) -> RecordingDetail:
