@@ -4,7 +4,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from soriham_api import ingest
 from soriham_api.ingest import (
@@ -186,3 +187,28 @@ def test_같은_파일이라도_워크스페이스가_다르면_중복이_아니
     assert first.status == "pending"
     assert second.status == "pending"
     assert second.duplicate_of_id is None
+
+
+def test_스캔은_도중에도_등록을_남긴다(db, tmp_path: Path, workspace, monkeypatch):
+    """1만 개짜리 폴더를 한 트랜잭션으로 몰면, 파일마다 도는 ffprobe 때문에 수십 분이
+    걸리고 그 사이 끊기면 등록이 통째로 사라진다."""
+    monkeypatch.setattr(ingest, "SCAN_COMMIT_EVERY", 2)
+    base = tmp_path / "rec"
+    base.mkdir()
+    seen: list[int] = []
+    for i in range(5):
+        (base / f"{i}.wav").write_bytes(b"RIFF" + b"\x00" * 16)
+
+    real_probe = ingest.probe_duration
+
+    def counting_probe(path):
+        # 스캔이 도는 도중 다른 연결에서 몇 건이 보이는지 센다
+        with Session(db.get_bind()) as other:
+            seen.append(other.scalar(select(func.count()).select_from(Recording)) or 0)
+        return real_probe(path)
+
+    monkeypatch.setattr(ingest, "probe_duration", counting_probe)
+    ingest.scan(db, (base,), workspace_id=workspace.id)
+
+    assert max(seen) > 0, "스캔이 끝나기 전에 커밋된 등록이 하나도 없다"
+    assert db.scalar(select(func.count()).select_from(Recording)) == 5

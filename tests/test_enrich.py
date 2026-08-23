@@ -132,3 +132,15 @@ def test_ollama_generator_sends_schema_and_parses():
     assert seen[0]["model"] == "qwen3:8b"
     assert seen[0]["think"] is False
     assert seen[1]["format"]["required"] == ["title", "summary", "tags"]
+
+
+def test_세그먼트가_없으면_되돌리지_않는다(db, tmp_path: Path, workspace):
+    """전사 산출물이 없으면 요약할 거리가 없다. 되돌려 봐야 엔리치먼트가 헛돈다."""
+    rows = register(db, tmp_path, ["a.wav"], workspace)
+    rows[0].status = "done"
+    rows[0].summary = None
+    db.commit()
+
+    assert requeue_unenriched(db) == 0
+    db.refresh(rows[0])
+    assert rows[0].status == "done"

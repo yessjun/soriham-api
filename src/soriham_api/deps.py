@@ -147,7 +147,7 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
             raise HTTPException(404, "워크스페이스가 없습니다")
         return WorkspaceContext(workspace=workspace, perm=perm)
 
-    def recording_at(need: Perm) -> Callable[..., Recording]:
+    def recording_at(need: Perm, *, with_segments: bool = False) -> Callable[..., Recording]:
         """public_id로 녹음을 얻는 유일한 통로. 권한이 모자라면 없는 것처럼 답한다."""
 
         def dep(
@@ -165,14 +165,13 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
             blocked = _blocked_status(session, principal)
             if blocked is not None:
                 raise HTTPException(403, _status_message(blocked))
+            # 세그먼트는 상세 응답에만 실린다. 두 시간짜리 회의는 세그먼트가 수천
+            # 줄이라, 오디오 Range 요청이나 제목 수정에서까지 끌어오면 그만큼이 헛일이다
+            loads = [selectinload(Recording.tags), selectinload(Recording.speaker_names)]
+            if with_segments:
+                loads.append(selectinload(Recording.segments))
             recording = session.scalar(
-                select(Recording)
-                .where(Recording.public_id == public_id)
-                .options(
-                    selectinload(Recording.tags),
-                    selectinload(Recording.segments),
-                    selectinload(Recording.speaker_names),
-                )
+                select(Recording).where(Recording.public_id == public_id).options(*loads)
             )
             if recording is None:
                 raise HTTPException(404, "녹음이 없습니다")

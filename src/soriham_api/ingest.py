@@ -171,10 +171,16 @@ def ingest_file(
     return recording
 
 
+# 스캔 도중 몇 건마다 커밋할지. 1만 개짜리 폴더를 한 트랜잭션으로 몰면 파일마다 도는
+# ffprobe 때문에 수십 분이 걸리고, 그 사이 끊기면 등록이 통째로 사라진다
+SCAN_COMMIT_EVERY = 200
+
+
 def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict[str, int]:
     """폴더들을 스캔해 신규 등록·재등장·유실을 반영하고 집계를 돌려준다."""
     stats = {"new": 0, "duplicate": 0, "reappeared": 0, "missing": 0}
 
+    since_commit = 0
     seen: set[str] = set()
     for base in dirs:
         if not base.is_dir():
@@ -192,6 +198,10 @@ def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict
                 stats["duplicate" if created.status == "duplicate" else "new"] += 1
             elif before == "missing":
                 stats["reappeared"] += 1
+            since_commit += 1
+            if since_commit >= SCAN_COMMIT_EVERY:
+                session.commit()
+                since_commit = 0
 
     # 스캔 폴더 아래로 등록돼 있던 파일이 사라졌으면 missing 마킹 (삭제하지 않는다).
     #
