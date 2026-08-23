@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from soriham_api.auth import sweep_sessions
 from soriham_api.ingest import resume_status
 from soriham_api.models import JobLog, Recording, Segment, Workspace
-from soriham_api.quota import allows_transcription
+from soriham_api.quota import DurationUnknown, allows_transcription, transcription_block
 from soriham_api.ratelimit import sweep as sweep_attempts
 from soriham_api.stt_client import RunnerClient, RunnerUnavailable
 
@@ -435,7 +435,18 @@ def process_one(
     name = recording.filename
     # 한도가 사는 자원은 전사 시간이다. 엔리치먼트만 남은 녹음은 GPU 비용이 이미
     # 치러졌으니 여기서 막으면 요약만 영영 안 붙는다
-    if recording.status != ENRICH_WAITING and not allows_transcription(session, recording):
+    blocked = (
+        transcription_block(session, recording) if recording.status != ENRICH_WAITING else None
+    )
+    if isinstance(blocked, DurationUnknown):
+        # 길이를 못 읽은 것은 기다려도 안 풀린다. quota_blocked로 세우면 그 파일이
+        # 영영 대기줄에 서고, 한도를 올려도 그대로다
+        recording.status = "error"
+        recording.error = str(blocked)
+        session.commit()
+        logger.warning("길이를 읽지 못해 세움: %s", name)
+        return True
+    if blocked is not None:
         # 고장이 아니라 풀리는 상태다. 기간이 지나거나 한도가 오르면 되돌아온다
         recording.status = "quota_blocked"
         session.commit()

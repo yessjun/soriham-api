@@ -164,7 +164,7 @@ def test_업로드가_용량_한도에_걸리면_파일이_남지_않는다(clie
 
 
 def test_워커가_한도를_넘으면_러너에_보내지_않는다(db, workspace, tmp_path):
-    """업로드 검사를 스캔 유입분이 우회하므로 여기가 권위 있는 관문이다."""
+    """업로드 검사를 스캔 유입분이 우회하므로 여기가 권위 있는 자리다."""
     workspace.quota_minutes = 10
     db.commit()
     make_recording(db, workspace, duration=3600.0)
@@ -442,3 +442,18 @@ def test_녹음도_기록도_없으면_거절이_워크스페이스를_지운다
     db.commit()
 
     assert db.get(Workspace, result.workspace.id) is None
+
+
+def test_길이를_못_읽은_파일은_한도가_아니라_error로_세운다(db, workspace, tmp_path):
+    """기다려도 안 풀리는 것을 quota_blocked로 세우면 그 파일이 영영 대기줄에 선다."""
+    workspace.quota_minutes = 600
+    db.commit()
+    make_recording(db, workspace, duration=None)
+    runner = FakeRunnerClient()
+
+    assert process_one(db, runner) is True
+
+    assert runner.calls == []
+    recording = db.scalar(select(Recording))
+    assert recording.status == "error"
+    assert "길이" in recording.error

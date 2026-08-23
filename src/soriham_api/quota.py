@@ -47,6 +47,14 @@ class QuotaExceeded(Exception):
     """한도를 넘었다. 메시지는 사용자에게 그대로 보여진다."""
 
 
+class DurationUnknown(QuotaExceeded):
+    """길이를 못 읽어 한도를 강제할 수 없다.
+
+    한도 초과와 갈라 두는 이유: 한도는 기간이 지나거나 한도를 올리면 풀리지만 이쪽은
+    아무리 기다려도 안 풀린다. 같은 값으로 세워두면 그 파일이 영영 대기줄에 선다.
+    """
+
+
 def measure(db: Session, workspace: Workspace, *, now: datetime | None = None) -> Usage:
     now = now or datetime.now(UTC)
     since = now - timedelta(days=WINDOW_DAYS)
@@ -96,7 +104,7 @@ def check_minutes(usage: Usage, duration_sec: float | None) -> None:
     if left is None:
         return
     if duration_sec is None:
-        raise QuotaExceeded(
+        raise DurationUnknown(
             "오디오 길이를 읽지 못해 받을 수 없습니다. 다른 형식으로 변환해 다시 올려 주세요"
         )
     need = duration_sec / 60.0
@@ -107,21 +115,30 @@ def check_minutes(usage: Usage, duration_sec: float | None) -> None:
         )
 
 
-def allows_transcription(db: Session, recording: Recording, *, now: datetime | None = None) -> bool:
-    """워커가 러너에 보내기 직전에 하는 한도 검사.
+def transcription_block(
+    db: Session, recording: Recording, *, now: datetime | None = None
+) -> QuotaExceeded | None:
+    """워커가 러너에 보내기 직전에 하는 한도 검사. 통과하면 None, 막으면 그 이유.
 
     업로드 시점 검사를 스캔 유입분이 우회하고, 동시 업로드는 검사와 소비 사이에서
     경합한다. 단일 GPU라 여기가 직렬화 지점이고, 그래서 여기가 권위 있는 자리다.
+
+    참/거짓이 아니라 이유를 돌려주는 이유: 한도 초과는 기다리면 풀리고 길이를 못 읽은
+    것은 안 풀린다. 부르는 쪽이 그 둘을 다르게 세워야 한다.
     """
     workspace = db.get(Workspace, recording.workspace_id)
     if workspace is None:
-        return True
+        return None
     usage = measure(db, workspace, now=now)
     try:
         check_minutes(usage, recording.duration_sec)
-    except QuotaExceeded:
-        return False
-    return True
+    except QuotaExceeded as exc:
+        return exc
+    return None
+
+
+def allows_transcription(db: Session, recording: Recording, *, now: datetime | None = None) -> bool:
+    return transcription_block(db, recording, now=now) is None
 
 
 def _gb(value: int) -> str:
