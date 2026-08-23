@@ -27,7 +27,14 @@ DIARIZE_ERROR_PREFIX = "화자분리 실패: "
 
 # 워커가 잡을 수 있는 대기 상태와, 재시작 시 재개 대상인 진행 중 상태
 CLAIMABLE = ("pending",)
-IN_FLIGHT = ("transcribing", "diarizing", "enriching")
+# 요약을 기다리는 상태. 처리 중(summarizing)과 갈라 둔다
+ENRICH_WAITING = "enriching"
+# 집는 순서. 전사 대기가 먼저고 요약 대기가 그다음이다
+CLAIM_TIERS = (CLAIMABLE, (ENRICH_WAITING,))
+# 후보를 추리는 쪽과 실제로 집는 쪽이 목록을 따로 들면 반드시 어긋난다. 어긋나면
+# 워크스페이스가 후보에 못 들어와 그 안의 일감이 영원히 안 돈다
+CLAIMABLE_STATUSES = tuple(s for tier in CLAIM_TIERS for s in tier)
+IN_FLIGHT = ("transcribing", "diarizing", "summarizing")
 
 
 class Enricher(Protocol):
@@ -40,10 +47,8 @@ def recover_in_flight(session: Session) -> int:
     """진행 중 상태로 남은(이전 실행이 중단된) 레코드를 체크포인트 기준으로 되돌린다."""
     count = 0
     for recording in session.scalars(select(Recording).where(Recording.status.in_(IN_FLIGHT))):
+        # 세그먼트까지 저장돼 있으면 엔리치먼트 대기로 돌아간다
         recording.status = resume_status(recording)
-        if recording.status == "enriching":
-            # 세그먼트까지는 저장된 상태 — 엔리치먼트부터 재개
-            pass
         count += 1
         logger.info("재개: %s -> %s", recording.filename, recording.status)
     session.commit()
@@ -60,7 +65,7 @@ def requeue_unenriched(session: Session) -> int:
         )
     ):
         if recording.segments:
-            recording.status = "enriching"
+            recording.status = ENRICH_WAITING
             count += 1
     session.commit()
     return count
@@ -142,7 +147,7 @@ def _workspaces_with_work(session: Session) -> list[int]:
     return list(
         session.scalars(
             select(Recording.workspace_id)
-            .where(Recording.status.in_((*CLAIMABLE, "enriching")))
+            .where(Recording.status.in_(CLAIMABLE_STATUSES))
             .distinct()
         ).all()
     )
@@ -150,7 +155,7 @@ def _workspaces_with_work(session: Session) -> list[int]:
 
 def _claim_in_workspace(session: Session, workspace_id: int) -> Recording | None:
     """한 워크스페이스 안에서 집는다. 전사 대기가 먼저, 그다음이 엔리치먼트 재개분."""
-    for statuses in (CLAIMABLE, ("enriching",)):
+    for statuses in CLAIM_TIERS:
         recording = session.scalars(
             select(Recording)
             .where(
@@ -267,7 +272,9 @@ def transcribe_stage(
     recording.error = (
         f"{DIARIZE_ERROR_PREFIX}{meta['diarize_error']}" if meta.get("diarize_error") else None
     )
-    recording.status = "enriching"
+    # 곧바로 처리 중 표식을 단다. 여기서 "요약 대기"로 커밋하면 잠금이 풀린 그 틈에
+    # 다른 워커가 같은 녹음을 집는다
+    recording.status = "summarizing"
     recording.progress = None
     recording.stage_started_at = datetime.now(UTC)
     _log_stage(
@@ -282,6 +289,14 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
     summary가 비어 있으면 다음 워커 시작 시 재큐잉돼 다시 시도된다.
     """
     started = datetime.now(UTC)
+    # **일을 시작하기 전에 처리 중임을 커밋한다.** 전사 단계의 transcribing과 같은 역할이다.
+    # 이 커밋이 워크스페이스 행 잠금을 놓아 다른 워커가 그 워크스페이스에 들어올 수 있게
+    # 하고, 라운드로빈 도장도 여기서 확정된다 — 뒤에 두면 엔리처가 죽을 때 롤백에 쓸려
+    # 나가 그 워크스페이스가 계속 1순위로 남는다
+    if recording.status != "summarizing":
+        recording.status = "summarizing"
+        recording.stage_started_at = started
+    session.commit()
     # 전사 단계가 남긴 경고는 엔리치먼트가 성공해도 지우지 않는다
     carried = recording.error if (recording.error or "").startswith(DIARIZE_ERROR_PREFIX) else None
     if enricher is not None:
@@ -320,7 +335,7 @@ def process_one(
     name = recording.filename
     # 한도가 사는 자원은 전사 시간이다. 엔리치먼트만 남은 녹음은 GPU 비용이 이미
     # 치러졌으니 여기서 막으면 요약만 영영 안 붙는다
-    if recording.status != "enriching" and not allows_transcription(session, recording):
+    if recording.status != ENRICH_WAITING and not allows_transcription(session, recording):
         # 고장이 아니라 풀리는 상태다. 기간이 지나거나 한도가 오르면 되돌아온다
         recording.status = "quota_blocked"
         session.commit()
@@ -328,7 +343,7 @@ def process_one(
         return True
     logger.info("처리 시작: %s (%s)", name, recording.status)
     try:
-        if recording.status != "enriching":
+        if recording.status != ENRICH_WAITING:
             transcribe_stage(session, recording, runner, model=model, language=language)
         enrich_stage(session, recording, enricher)
         logger.info("처리 완료: %s", name)

@@ -176,3 +176,140 @@ def test_엔리치먼트만_남은_워크스페이스도_차례를_받는다(db,
 
 def test_일감이_없으면_아무것도_집지_않는다(db, workspace):
     assert claim_next(db) is None
+
+
+# --- 처리 중인 녹음을 다시 집지 않는가 -------------------------------------------
+
+
+def test_엔리치먼트_중인_녹음은_다른_워커가_집지_않는다(engine, db, workspace, other_workspace):
+    """회전이 이 자리를 일상적으로 밟는다.
+
+    전사가 끝난 녹음은 요약을 기다리는 것과 지금 처리 중인 것이 DB에서 구별돼야 한다.
+    한 값으로 겸하면 워커가 붙어 있는 녹음을 다른 워커가 집어 LLM을 두 번 부르고,
+    요약과 오류를 늦게 쓴 쪽이 덮는다.
+    """
+    from soriham_api.worker import transcribe_stage
+    from test_worker import FakeRunnerClient
+
+    add(db, workspace, "백로그.wav")
+    friend = add(db, other_workspace, "친구회의.wav")
+    now = datetime.now(UTC)
+    # 친구 워크스페이스가 더 오래 안 잡혀서 회전이 그리로 민다
+    workspace.last_claimed_at = now
+    other_workspace.last_claimed_at = now - timedelta(minutes=1)
+    db.commit()
+
+    with Session(engine) as a:
+        claimed = a.get(Recording, friend.id)
+        transcribe_stage(a, claimed, FakeRunnerClient(), model=None, language=None)
+
+        with Session(engine) as b:
+            second = claim_next(b)
+
+            assert second is not None
+            assert second.id != friend.id
+
+
+def test_요약을_시작하면_워크스페이스_잠금을_놓는다(engine, db, workspace, other_workspace):
+    """LLM 호출이 끝날 때까지 잠그고 있으면 다른 워크스페이스의 전사가 멈춘다."""
+    from soriham_api.worker import enrich_stage
+
+    waiting = add(db, other_workspace, "요약대기.wav", status="enriching")
+    db.add(Segment(recording_id=waiting.id, idx=0, start_sec=0.0, end_sec=1.0, text="안녕"))
+    add(db, workspace, "전사대기.wav")
+    other_workspace.last_claimed_at = None
+    workspace.last_claimed_at = datetime.now(UTC)
+    db.commit()
+
+    도중에_집힌_것 = []
+
+    class 도는동안_확인하는_엔리처:
+        """요약이 끝난 뒤가 아니라 **도는 도중에** 본다.
+
+        끝난 뒤에 보면 마지막 커밋이 이미 잠금을 놓은 상태라 무엇을 시험하는지 모른다.
+        """
+
+        def enrich(self, session, recording):
+            with Session(engine) as b:
+                b.execute(text("set local lock_timeout = '2s'"))
+                도중에_집힌_것.append(claim_next(b))
+
+    with Session(engine) as a:
+        claimed = claim_next(a)
+        assert claimed.id == waiting.id
+        enrich_stage(a, claimed, 도는동안_확인하는_엔리처())
+
+    assert len(도중에_집힌_것) == 1
+    assert 도중에_집힌_것[0] is not None
+    assert 도중에_집힌_것[0].filename == "전사대기.wav"
+
+
+def test_요약이_실패해도_도장은_남는다(engine, db, workspace, other_workspace):
+    """도장이 롤백에 쓸려 나가면 엔리처가 죽어 있는 동안 그 워크스페이스가 계속 1순위다."""
+    from soriham_api.worker import process_one
+    from test_worker import FakeRunnerClient
+
+    class 죽은엔리처:
+        def enrich(self, session, recording):
+            raise RuntimeError("LLM down")
+
+    waiting = add(db, other_workspace, "요약대기.wav", status="enriching")
+    db.add(Segment(recording_id=waiting.id, idx=0, start_sec=0.0, end_sec=1.0, text="안녕"))
+    add(db, workspace, "전사대기.wav")
+    other_workspace.last_claimed_at = None
+    workspace.last_claimed_at = datetime.now(UTC)
+    db.commit()
+
+    with Session(engine) as a:
+        assert process_one(a, FakeRunnerClient(), enricher=죽은엔리처()) is True
+
+    db.expire_all()
+    assert db.get(Workspace, other_workspace.id).last_claimed_at is not None
+
+
+def test_요약_중인_워커가_다른_워크스페이스를_붙잡고_있지_않는다(
+    engine, db, workspace, other_workspace
+):
+    """빈손으로 지나간 워크스페이스의 잠금도 트랜잭션이 끝날 때까지 남는다.
+
+    요약이 몇 분씩 걸리는데 그동안 잠금을 쥐고 있으면, 워커 둘이 워크스페이스 둘을
+    도는 배치에서 나머지 하나가 후보를 전부 건너뛰고 빈손으로 잠든다. 다른 곳에
+    일감이 있는데도 GPU가 논다.
+    """
+    from soriham_api.worker import enrich_stage
+
+    now = datetime.now(UTC)
+    # W2가 1순위지만 그 안의 유일한 녹음은 제3의 트랜잭션이 쥐고 있다
+    held = add(db, other_workspace, "남이쥔것.wav")
+    waiting = add(db, workspace, "요약대기.wav", status="enriching")
+    db.add(Segment(recording_id=waiting.id, idx=0, start_sec=0.0, end_sec=1.0, text="안녕"))
+    other_workspace.last_claimed_at = now - timedelta(minutes=10)
+    workspace.last_claimed_at = now - timedelta(minutes=5)
+    db.commit()
+
+    도중에_집힌_것 = []
+
+    class 도는동안_확인하는_엔리처:
+        def enrich(self, session, recording):
+            # 요약이 도는 사이 1순위 워크스페이스에 새 녹음이 들어온다.
+            # **워크스페이스 행을 쥐고 있으면 이 INSERT부터 막힌다** — 외래 키가
+            # 그 행에 키 공유 잠금을 걸기 때문이다. 업로드가 통째로 멈춘다는 뜻이라
+            # 차례를 놓치는 것보다 훨씬 나쁘다
+            with Session(engine) as writer:
+                writer.execute(text("set local lock_timeout = '2s'"))
+                ws = writer.get(Workspace, other_workspace.id)
+                add(writer, ws, "새로들어온것.wav")
+            with Session(engine) as b:
+                b.execute(text("set local lock_timeout = '2s'"))
+                도중에_집힌_것.append(claim_next(b))
+
+    with Session(engine) as holder:
+        holder.scalars(select(Recording).where(Recording.id == held.id).with_for_update()).one()
+
+        with Session(engine) as a:
+            claimed = claim_next(a)  # W2를 빈손으로 지나 W1의 요약 대기를 집는다
+            assert claimed.id == waiting.id
+            enrich_stage(a, claimed, 도는동안_확인하는_엔리처())
+
+    assert 도중에_집힌_것[0] is not None
+    assert 도중에_집힌_것[0].filename == "새로들어온것.wav"
