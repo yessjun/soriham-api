@@ -30,6 +30,7 @@ def test_state_machine_statuses():
         "transcribing",
         "diarizing",
         "enriching",
+        "summarizing",
         "done",
         "error",
         "missing",

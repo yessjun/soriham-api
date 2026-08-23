@@ -28,7 +28,10 @@ RECORDING_STATUSES = (
     "pending",
     "transcribing",
     "diarizing",
+    # enriching은 "요약을 기다리는 중", summarizing은 "지금 워커가 붙어 있는 중"이다.
+    # 둘을 한 값으로 겸하면 처리 중인 녹음을 다른 워커가 집어 LLM을 두 번 부른다
     "enriching",
+    "summarizing",
     "done",
     "error",
     "missing",

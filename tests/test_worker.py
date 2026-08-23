@@ -117,7 +117,7 @@ def test_process_one_isolates_error_and_continues(db, tmp_path: Path, workspace)
 def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path, workspace):
     rows = register(db, tmp_path, ["a.wav", "b.wav"], workspace)
     rows[0].status = "transcribing"  # 세그먼트 없음 -> pending
-    rows[1].status = "enriching"
+    rows[1].status = "summarizing"  # 세그먼트까지 저장됨 -> 요약 대기
     rows[1].segments.append(Segment(idx=0, start_sec=0, end_sec=1, text="x"))
     db.commit()
 
@@ -126,6 +126,18 @@ def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path, workspace):
     db.refresh(rows[1])
     assert rows[0].status == "pending"
     assert rows[1].status == "enriching"
+
+
+def test_요약을_기다리는_녹음은_재개_대상이_아니다(db, tmp_path: Path, workspace):
+    """enriching은 대기 상태다. 워커가 그냥 집으면 되지 되돌릴 것이 없다."""
+    rows = register(db, tmp_path, ["a.wav"], workspace)
+    rows[0].status = "enriching"
+    rows[0].segments.append(Segment(idx=0, start_sec=0, end_sec=1, text="x"))
+    db.commit()
+
+    assert recover_in_flight(db) == 0
+    db.refresh(rows[0])
+    assert rows[0].status == "enriching"
 
 
 def test_enriching_recording_skips_transcribe(db, tmp_path: Path, workspace):
