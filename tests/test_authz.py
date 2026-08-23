@@ -72,6 +72,19 @@ def recording_routes(rec: Recording) -> list[tuple[str, str, dict]]:
             {},
         ),
         ("DELETE", f"/api/recordings/{pid}", {}),
+        ("GET", f"/api/recordings/{pid}/shares", {}),
+        ("POST", f"/api/recordings/{pid}/shares", {"json": {"email": "x@example.com"}}),
+        (
+            "DELETE",
+            f"/api/recordings/{pid}/shares/00000000-0000-0000-0000-000000000001",
+            {},
+        ),
+        ("POST", f"/api/recordings/{pid}/links", {"json": {}}),
+        (
+            "DELETE",
+            f"/api/recordings/{pid}/links/00000000-0000-0000-0000-000000000001",
+            {},
+        ),
     ]
 
 

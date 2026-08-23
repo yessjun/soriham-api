@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import threading
 import uuid
-from collections.abc import Iterator
-from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
@@ -21,7 +19,7 @@ from soriham_api.api_schemas import (
     RecordingSummary,
     SearchHit,
     SearchResult,
-    SegmentOut,
+    ShareStateOut,
     SpeakerNameIn,
     Stats,
     StatusCount,
@@ -40,6 +38,7 @@ from soriham_api.ingest import (
     partial_hash,
     probe_duration,
 )
+from soriham_api.media import range_response
 from soriham_api.models import JobLog, Recording, SpeakerName, Tag, User, Workspace
 from soriham_api.permissions import Perm, Principal, resolve_recording_perm
 from soriham_api.quota import (
@@ -50,6 +49,10 @@ from soriham_api.quota import (
     measure,
 )
 from soriham_api.routes_auth import register as register_auth_routes
+from soriham_api.routes_sharing import register as register_sharing_routes
+from soriham_api.serializers import recording_summary as _summary
+from soriham_api.serializers import segment_out
+from soriham_api.sharing import share_counts
 from soriham_api.storage import (
     AudioUnavailable,
     resolve_audio_path,
@@ -64,8 +67,6 @@ from soriham_api.uploads import (
     safe_filename,
     stage_upload,
 )
-
-CHUNK_SIZE = 1024 * 256
 
 
 def _like_pattern(q: str) -> str:
@@ -115,6 +116,7 @@ def create_app(
     editable = deps.recording_at(Perm.EDIT)
     manageable = deps.recording_at(Perm.MANAGE)
     register_auth_routes(app, deps)
+    register_sharing_routes(app, deps)
 
     @app.get("/api/workspaces/{workspace_id}/recordings", response_model=RecordingList)
     def list_recordings(
@@ -232,24 +234,21 @@ def create_app(
         principal: Principal = Depends(deps.principal),
         session: Session = Depends(db),
     ) -> RecordingDetail:
-        can_edit = resolve_recording_perm(session, principal, recording) >= Perm.EDIT
+        perm = resolve_recording_perm(session, principal, recording)
+        state = None
+        if perm >= Perm.MANAGE:
+            # 공유를 관리할 수 있는 사람에게만 채운다. 콘솔이 공유 버튼의 상태를
+            # 그리려고 공유 목록을 따로 부르지 않게 하는 값이다
+            counts = share_counts(session, recording)
+            state = ShareStateOut(user_count=counts.user_count, link_count=counts.link_count)
         return RecordingDetail(
             **_summary(recording).model_dump(),
-            can_edit=can_edit,
+            can_edit=perm >= Perm.EDIT,
+            share_state=state,
             error=recording.error,
             stt_meta=recording.stt_meta,
             speaker_names={n.speaker_key: n.display_name for n in recording.speaker_names},
-            segments=[
-                SegmentOut(
-                    idx=s.idx,
-                    start_sec=s.start_sec,
-                    end_sec=s.end_sec,
-                    speaker_key=s.speaker_key,
-                    text=s.text,
-                    kind=s.kind,
-                )
-                for s in recording.segments
-            ],
+            segments=[segment_out(s) for s in recording.segments],
         )
 
     @app.patch("/api/recordings/{public_id}", response_model=RecordingSummary)
@@ -309,7 +308,7 @@ def create_app(
             raise HTTPException(
                 404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)"
             ) from None
-        return _range_response(path, request.headers.get("range"))
+        return range_response(path, request.headers.get("range"))
 
     @app.delete("/api/recordings/{public_id}", status_code=204)
     def delete_recording(
@@ -434,14 +433,7 @@ def create_app(
             hits.append(
                 SearchHit(
                     recording=_summary(rec),
-                    segment=SegmentOut(
-                        idx=seg.idx,
-                        start_sec=seg.start_sec,
-                        end_sec=seg.end_sec,
-                        speaker_key=seg.speaker_key,
-                        text=seg.text,
-                        kind=seg.kind,
-                    ),
+                    segment=segment_out(seg),
                 )
             )
         return SearchResult(hits=hits[:limit])
@@ -559,98 +551,3 @@ def _apply_filters(
             )
         )
     return stmt
-
-
-def _eta_sec(recording: Recording) -> float | None:
-    """진행률과 단계 경과 시간으로 남은 시간을 추정한다.
-
-    진행률이 없거나 아직 0이면 추정할 근거가 없으므로 None.
-    """
-    progress = recording.progress
-    started = recording.stage_started_at
-    if not progress or started is None or progress >= 1:
-        return None
-    elapsed = (datetime.now(UTC) - started).total_seconds()
-    if elapsed <= 0:
-        return None
-    return elapsed / progress * (1 - progress)
-
-
-def _summary(recording: Recording) -> RecordingSummary:
-    return RecordingSummary(
-        id=recording.public_id,
-        filename=recording.filename,
-        title=recording.title,
-        summary=recording.summary,
-        recorded_at=recording.recorded_at,
-        duration_sec=recording.duration_sec,
-        status=recording.status,
-        language=recording.language,
-        tags=[TagOut(id=t.public_id, name=t.name) for t in recording.tags],
-        progress=recording.progress,
-        eta_sec=_eta_sec(recording),
-    )
-
-
-def _range_response(path: Path, range_header: str | None) -> Response:
-    size = path.stat().st_size
-    media_type = _media_type(path)
-    if not range_header:
-        return StreamingResponse(
-            _iter_file(path, 0, size - 1),
-            media_type=media_type,
-            headers={"accept-ranges": "bytes", "content-length": str(size)},
-        )
-    try:
-        unit, _, spec = range_header.partition("=")
-        start_s, _, end_s = spec.strip().partition("-")
-        if unit.strip().lower() != "bytes":
-            raise ValueError
-        if start_s:
-            start = int(start_s)
-            end = int(end_s) if end_s else size - 1
-        else:
-            # suffix range: 마지막 N바이트
-            start = max(0, size - int(end_s))
-            end = size - 1
-        if start > end or start >= size:
-            raise ValueError
-    except ValueError:
-        return Response(status_code=416, headers={"content-range": f"bytes */{size}"})
-    end = min(end, size - 1)
-    return StreamingResponse(
-        _iter_file(path, start, end),
-        status_code=206,
-        media_type=media_type,
-        headers={
-            "accept-ranges": "bytes",
-            "content-range": f"bytes {start}-{end}/{size}",
-            "content-length": str(end - start + 1),
-        },
-    )
-
-
-def _iter_file(path: Path, start: int, end: int) -> Iterator[bytes]:
-    remaining = end - start + 1
-    with path.open("rb") as f:
-        f.seek(start)
-        while remaining > 0:
-            chunk = f.read(min(CHUNK_SIZE, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-
-
-def _media_type(path: Path) -> str:
-    return {
-        ".wav": "audio/wav",
-        ".mp3": "audio/mpeg",
-        ".m4a": "audio/mp4",
-        ".aac": "audio/aac",
-        ".flac": "audio/flac",
-        ".ogg": "audio/ogg",
-        ".opus": "audio/ogg",
-        ".wma": "audio/x-ms-wma",
-        ".amr": "audio/amr",
-    }.get(path.suffix.lower(), "application/octet-stream")

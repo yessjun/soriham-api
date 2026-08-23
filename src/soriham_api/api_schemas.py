@@ -44,9 +44,18 @@ class SegmentOut(BaseModel):
     kind: str = "speech"
 
 
+class ShareStateOut(BaseModel):
+    """이 녹음이 밖으로 얼마나 열려 있는지. 공유를 관리할 수 있는 사람에게만 채운다."""
+
+    user_count: int
+    link_count: int
+
+
 class RecordingDetail(RecordingSummary):
     # 화면이 편집 어포던스를 그릴지. 콘솔이 역할 산술을 다시 하면 두 규칙이 어긋난다
     can_edit: bool = False
+    # 공유를 관리할 권한이 없으면 비어 있다
+    share_state: ShareStateOut | None = None
     error: str | None
     stt_meta: dict[str, Any] | None
     speaker_names: dict[str, str]
@@ -160,3 +169,77 @@ class UsageOut(BaseModel):
     quota_bytes: int | None
     # 롤링 창이라 시작점이 없다. 며칠치를 세는지만 말한다
     window_days: int
+
+
+class ShareIn(BaseModel):
+    email: str
+    permission: str = "view"
+
+
+class ShareOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: str | None
+    permission: str
+    # 아직 가입하지 않은 이메일. 승인되면 계정에 이어진다
+    pending: bool
+
+
+class ShareLinkIn(BaseModel):
+    label: str | None = None
+    password: str | None = None
+    allow_audio: bool = True
+    # 화자 이름은 손으로 넣은 실명이라 노출을 따로 고른다
+    allow_speaker_names: bool = True
+    # None이면 무기한
+    expires_in_days: int | None = 30
+
+
+class ShareLinkOut(BaseModel):
+    id: uuid.UUID
+    label: str | None
+    has_password: bool
+    allow_audio: bool
+    allow_speaker_names: bool
+    expires_at: datetime | None
+    view_count: int
+    last_viewed_at: datetime | None
+    created_at: datetime
+
+
+class IssuedShareLinkOut(ShareLinkOut):
+    # 원문 토큰은 발급 응답에만 실린다. 저장하는 것은 해시뿐이다
+    token: str
+
+
+class SharePanelOut(BaseModel):
+    """공유 화면 하나가 쓰는 값 전부. 세 갈래를 따로 부르면 화면이 어긋난다."""
+
+    users: list[ShareOut]
+    links: list[ShareLinkOut]
+    workspace_name: str
+
+
+class SharedRecordingOut(BaseModel):
+    """링크로 여는 응답. 파일명·오류·엔진 메타는 담지 않는다.
+
+    파일명은 그 자체가 내용을 말한다("20260817_인사평가.m4a"). 오류와 엔진 메타는
+    바깥 사람이 볼 이유가 없다.
+    """
+
+    title: str | None
+    summary: str | None
+    recorded_at: datetime | None
+    duration_sec: float | None
+    status: str
+    language: str | None
+    tags: list[TagOut]
+    progress: float | None = None
+    eta_sec: float | None = None
+    allow_audio: bool
+    speaker_names: dict[str, str]
+    segments: list[SegmentOut]
+
+
+class UnlockIn(BaseModel):
+    password: str
