@@ -150,3 +150,13 @@ class WorkspaceCreateIn(BaseModel):
 
 class RoleIn(BaseModel):
     role: str
+
+
+class UsageOut(BaseModel):
+    used_minutes: float
+    # 비어 있으면 무제한
+    quota_minutes: int | None
+    used_bytes: int
+    quota_bytes: int | None
+    # 롤링 창이라 시작점이 없다. 며칠치를 세는지만 말한다
+    window_days: int

@@ -134,7 +134,7 @@ def test_스캔은_다른_워크스페이스의_녹음을_missing으로_바꾸�
     """이 전환에서 가장 위험한 자리.
 
     다른 워크스페이스의 녹음이 **스캔 폴더 아래에 있고 파일이 없을 때** 스윕이
-    그것까지 훑으면, 주인이 스캔 한 번 돌릴 때 남의 녹음이 조용히 "원본 없음"이 된다.
+    그것까지 훑으면, 소유자가 스캔을 한 번 돌릴 때 남의 녹음이 조용히 "원본 없음"이 된다.
     경로가 겹치는 배치(업로드 폴더가 감시 폴더 안에 들어간 사고)에서 실제로 생긴다.
     """
     rec_dir = tmp_path / "rec"
@@ -153,7 +153,7 @@ def test_스캔은_다른_워크스페이스의_녹음을_missing으로_바꾸�
     assert (
         db.scalar(select(Recording.status).where(Recording.filename == "theirs.wav")) != "missing"
     )
-    # 같은 워크스페이스라도 업로드본은 주인의 스캔 폴더 사정과 무관하다
+    # 같은 워크스페이스라도 업로드본은 소유자의 스캔 폴더 사정과 무관하다
     assert (
         db.scalar(select(Recording.status).where(Recording.filename == "mine-uploaded.wav"))
         != "missing"

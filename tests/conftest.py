@@ -85,7 +85,7 @@ def owner(db, workspace):
         db,
         email="owner@example.com",
         password_hash=auth.hash_password(TEST_PASSWORD),
-        display_name="주인",
+        display_name="소유자",
         status="active",
     )
     add_member(db, workspace, user, "owner")

@@ -326,7 +326,7 @@ def test_부트스트랩은_두_번_돌려도_안전하다(db):
         db,
         email="owner@example.com",
         password="암구호",
-        display_name="주인",
+        display_name="소유자",
         workspace_slug="mine",
         workspace_name="내 보관함",
     )
@@ -338,7 +338,7 @@ def test_부트스트랩은_두_번_돌려도_안전하다(db):
         db,
         email="owner@example.com",
         password="다른 암구호",
-        display_name="주인",
+        display_name="소유자",
         workspace_slug="mine",
         workspace_name="내 보관함",
     )

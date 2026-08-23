@@ -144,7 +144,7 @@ def can_play_audio(principal: Principal, own_perm: Perm) -> bool:
 
 
 def can_see_speaker_names(principal: Principal, own_perm: Perm) -> bool:
-    """화자 이름은 주인이 손으로 넣은 실명이라 링크마다 따로 고른다."""
+    """화자 이름은 소유자가 손으로 넣은 실명이라 링크마다 따로 고른다."""
     if own_perm >= Perm.VIEW:
         return True
     if principal.link_recording_id is not None:
