@@ -37,7 +37,13 @@ from soriham_api.ingest import (
     ingest_file,
     partial_hash,
 )
-from soriham_api.models import JobLog, Recording, SpeakerName, Tag
+from soriham_api.models import JobLog, Recording, SpeakerName, Tag, Workspace
+from soriham_api.storage import workspace_upload_dir
+from soriham_api.tenancy import (
+    WorkspaceNotFound,
+    get_workspace,
+    resolve_tag,
+)
 from soriham_api.uploads import (
     UploadEmpty,
     UploadTooLarge,
@@ -84,6 +90,18 @@ def create_app(
         with factory() as session:
             yield session
 
+    def _upload_workspace(session: Session) -> Workspace:
+        """업로드본이 들어갈 워크스페이스.
+
+        지금은 설정이 정한 한 곳이다. 인증이 붙으면 요청한 사람의 워크스페이스로 바뀐다.
+        """
+        if not cfg.default_workspace:
+            raise HTTPException(503, "업로드 대상 워크스페이스가 설정돼 있지 않습니다")
+        try:
+            return get_workspace(session, cfg.default_workspace)
+        except WorkspaceNotFound as exc:
+            raise HTTPException(503, str(exc)) from None
+
     def get_recording(session: Session, public_id: uuid.UUID) -> Recording:
         recording = session.scalar(
             select(Recording)
@@ -122,6 +140,7 @@ def create_app(
         """콘솔에서 올린 오디오를 보관 폴더에 저장하고 큐에 등록한다."""
         if cfg.upload_dir is None:
             raise HTTPException(503, "업로드가 설정돼 있지 않습니다 (UPLOAD_DIR)")
+        workspace = _upload_workspace(session)
         name = safe_filename(file.filename)
         if name is None:
             raise HTTPException(422, "파일 이름이 없습니다")
@@ -147,7 +166,7 @@ def create_app(
             dest: Path | None = None
             try:
                 digest = partial_hash(staged, staged.stat().st_size)
-                original = find_duplicate(session, digest)
+                original = find_duplicate(session, digest, workspace_id=workspace.id)
                 if original is not None:
                     # 같은 내용이 이미 있으면 사본을 남기지 않고 기존 항목으로 돌려보낸다
                     raise HTTPException(
@@ -159,8 +178,13 @@ def create_app(
                     )
                 # 디스크에 없더라도 DB에 등록된 경로는 피한다 — 파일만 지워진 기존
                 # 녹음의 자리를 새 파일이 차지하면 그 행이 엉뚱한 오디오를 가리킨다
-                dest = finalize(staged, cfg.upload_dir, name, taken=registered)
-                recording = ingest_file(session, dest)
+                dest = finalize(
+                    staged,
+                    workspace_upload_dir(cfg.upload_dir, workspace.public_id),
+                    name,
+                    taken=registered,
+                )
+                recording = ingest_file(session, dest, workspace_id=workspace.id, source="upload")
                 if recording is None:  # registered()가 걸렀어야 하는 경우
                     raise HTTPException(500, "업로드 경로를 정하지 못했습니다")
                 session.commit()
@@ -254,11 +278,7 @@ def create_app(
         name = body.name.strip()
         if not name:
             raise HTTPException(422, "태그 이름이 비어 있습니다")
-        tag = session.scalar(select(Tag).where(Tag.name == name))
-        if tag is None:
-            tag = Tag(name=name)
-            session.add(tag)
-            session.flush()
+        tag = resolve_tag(session, recording.workspace_id, name)
         if tag not in recording.tags:
             recording.tags.append(tag)
         session.commit()

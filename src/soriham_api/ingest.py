@@ -110,15 +110,19 @@ def resume_status(recording: Recording) -> str:
     return "pending"
 
 
-def find_duplicate(session: Session, digest: str) -> Recording | None:
-    """같은 부분 해시로 이미 등록된 원본을 찾는다.
+def find_duplicate(session: Session, digest: str, *, workspace_id: int) -> Recording | None:
+    """같은 워크스페이스 안에서 같은 부분 해시로 등록된 원본을 찾는다.
 
     duplicate는 물론 missing도 제외한다 — 파일이 사라진 행을 원본으로 치면, 백업본을
     다시 넣으려 할 때 중복으로 막혀 복구할 방법이 없어진다.
+
+    범위를 워크스페이스로 좁히는 이유: 전역으로 찾으면 같은 파일을 올려보는 것만으로
+    남이 그 파일을 가졌는지, 무슨 이름을 붙였는지 알 수 있다.
     """
     return session.scalar(
         select(Recording)
         .where(
+            Recording.workspace_id == workspace_id,
             Recording.partial_hash == digest,
             Recording.status.not_in(("duplicate", "missing")),
         )
@@ -126,8 +130,19 @@ def find_duplicate(session: Session, digest: str) -> Recording | None:
     )
 
 
-def ingest_file(session: Session, path: Path) -> Recording | None:
-    """파일 하나를 등록한다. 이미 등록된 경로면 재등장 처리만 하고 None을 돌려준다."""
+def ingest_file(
+    session: Session,
+    path: Path,
+    *,
+    workspace_id: int,
+    source: str = "scan",
+    created_by_user_id: int | None = None,
+) -> Recording | None:
+    """파일 하나를 등록한다. 이미 등록된 경로면 재등장 처리만 하고 None을 돌려준다.
+
+    `workspace_id`는 기본값 없는 키워드 인자다 — 호출부가 어느 워크스페이스에 넣는지
+    반드시 말하게 한다. 기본값을 두면 빠뜨린 호출부가 조용히 엉뚱한 곳에 넣는다.
+    """
     path = path.resolve()
     existing = session.scalar(select(Recording).where(Recording.path == str(path)))
     if existing is not None:
@@ -138,8 +153,11 @@ def ingest_file(session: Session, path: Path) -> Recording | None:
 
     size = path.stat().st_size
     digest = partial_hash(path, size)
-    original = find_duplicate(session, digest)
+    original = find_duplicate(session, digest, workspace_id=workspace_id)
     recording = Recording(
+        workspace_id=workspace_id,
+        source=source,
+        created_by_user_id=created_by_user_id,
         path=str(path),
         filename=path.name,
         size_bytes=size,
@@ -153,7 +171,7 @@ def ingest_file(session: Session, path: Path) -> Recording | None:
     return recording
 
 
-def scan(session: Session, dirs: tuple[Path, ...]) -> dict[str, int]:
+def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict[str, int]:
     """폴더들을 스캔해 신규 등록·재등장·유실을 반영하고 집계를 돌려준다."""
     stats = {"new": 0, "duplicate": 0, "reappeared": 0, "missing": 0}
 
@@ -169,15 +187,25 @@ def scan(session: Session, dirs: tuple[Path, ...]) -> dict[str, int]:
             before = session.scalar(
                 select(Recording.status).where(Recording.path == str(path.resolve()))
             )
-            created = ingest_file(session, path)
+            created = ingest_file(session, path, workspace_id=workspace_id)
             if created is not None:
                 stats["duplicate" if created.status == "duplicate" else "new"] += 1
             elif before == "missing":
                 stats["reappeared"] += 1
 
-    # 스캔 폴더 아래로 등록돼 있던 파일이 사라졌으면 missing 마킹 (삭제하지 않는다)
+    # 스캔 폴더 아래로 등록돼 있던 파일이 사라졌으면 missing 마킹 (삭제하지 않는다).
+    #
+    # 범위를 좁히는 두 조건이 없으면 스캔 한 번에 **다른 사람의 업로드가 전부** missing이
+    # 된다 — 그들의 파일은 이 폴더에 있을 이유가 없으므로 전부 "사라진 것"으로 보인다.
+    # source까지 보는 이유: 스캔 워크스페이스에 섞여 들어온 업로드본도 지켜야 한다.
     prefixes = tuple(str(d.resolve()) + os.sep for d in dirs if d.is_dir())
-    for recording in session.scalars(select(Recording).where(Recording.status != "missing")):
+    for recording in session.scalars(
+        select(Recording).where(
+            Recording.status != "missing",
+            Recording.workspace_id == workspace_id,
+            Recording.source == "scan",
+        )
+    ):
         if recording.path.startswith(prefixes) and recording.path not in seen:
             recording.status = "missing"
             stats["missing"] += 1

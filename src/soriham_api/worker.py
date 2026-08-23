@@ -99,6 +99,8 @@ def _log_stage(
     meta = meta or {}
     session.add(
         JobLog(
+            # 워크스페이스를 직접 문다 — 녹음이 지워져도 사용 이력은 남아야 한다
+            workspace_id=recording.workspace_id,
             recording_id=recording.id,
             stage=stage,
             status=status,
