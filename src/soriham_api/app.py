@@ -38,10 +38,14 @@ from soriham_api.ingest import (
     ingest_file,
     partial_hash,
 )
-from soriham_api.models import JobLog, Recording, SpeakerName, Tag, User
+from soriham_api.models import JobLog, Recording, SpeakerName, Tag, User, Workspace
 from soriham_api.permissions import Perm, Principal, resolve_recording_perm
 from soriham_api.routes_auth import register as register_auth_routes
-from soriham_api.storage import workspace_upload_dir
+from soriham_api.storage import (
+    AudioUnavailable,
+    resolve_audio_path,
+    workspace_upload_dir,
+)
 from soriham_api.tenancy import resolve_tag
 from soriham_api.uploads import (
     UploadEmpty,
@@ -269,10 +273,22 @@ def create_app(
     def stream_audio(
         request: Request,
         recording: Recording = Depends(viewable),
+        session: Session = Depends(db),
     ) -> Response:
-        path = Path(recording.path)
-        if not path.is_file():
-            raise HTTPException(404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)")
+        workspace = session.get(Workspace, recording.workspace_id)
+        try:
+            path = resolve_audio_path(
+                recording.path,
+                source=recording.source,
+                workspace_public_id=workspace.public_id,
+                upload_dir=cfg.upload_dir,
+                audio_dirs=cfg.audio_dirs,
+            )
+        except AudioUnavailable:
+            # 뿌리 밖이든 파일이 없든 같은 답이다. 구분하면 어떤 경로가 있는지 알려준다
+            raise HTTPException(
+                404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)"
+            ) from None
         return _range_response(path, request.headers.get("range"))
 
     @app.post("/api/recordings/{public_id}/tags", response_model=list[TagOut])
