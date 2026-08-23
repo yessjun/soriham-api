@@ -131,6 +131,8 @@ def register(app: FastAPI, deps: Deps) -> None:
                 display_name=body.display_name.strip(),
                 signup_note=body.signup_note,
                 auto_approve=cfg.auto_approve,
+                quota_minutes=cfg.default_quota_minutes,
+                quota_bytes=cfg.default_quota_bytes,
             )
         except EmailTaken:
             raise HTTPException(409, "이미 가입된 이메일입니다") from None
@@ -250,7 +252,13 @@ def register(app: FastAPI, deps: Deps) -> None:
         _: None = Depends(deps.require_csrf),
     ) -> MeOut:
         target = _target_user(session, user_public_id)
-        approve(session, target, reviewer=admin)
+        approve(
+            session,
+            target,
+            reviewer=admin,
+            quota_minutes=cfg.default_quota_minutes,
+            quota_bytes=cfg.default_quota_bytes,
+        )
         session.commit()
         return _me(session, target)
 
