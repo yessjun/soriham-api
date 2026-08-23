@@ -62,14 +62,21 @@ def test_API_경로를_삼키지_않는다(client):
     assert "소리함" not in resp.text
 
 
-def test_폴더_밖은_내보내지_않는다(client, console: Path, tmp_path: Path):
-    """경로에 상위 이동이 섞여도 빌드 폴더 밖 파일이 나가면 안 된다."""
-    secret = tmp_path / "secret.txt"
-    secret.write_text("시크릿")
+def test_폴더_밖은_내보내지_않는다(console: Path, tmp_path: Path):
+    """지금 서버는 경로를 정규화해 상위 이동이 핸들러까지 오지 않는다.
 
-    resp = client.get("/../secret.txt")
+    그래도 파일을 여는 자리에서 봉쇄를 확인해야 서버를 바꿀 때 조용히 뚫리지 않는다.
+    HTTP로는 재현할 수 없어 판정 함수를 직접 시험한다.
+    """
+    from soriham_api.app import console_file
 
-    assert "시크릿" not in resp.text
+    (tmp_path / "secret.txt").write_text("시크릿")
+
+    assert console_file(console, "../secret.txt") is None
+    assert console_file(console, "assets/../../secret.txt") is None
+    assert console_file(console, "assets/app.js") is not None
+    assert console_file(console, "없는파일.js") is None
+    assert console_file(console, "") is None
 
 
 def test_설정이_없으면_서빙하지_않는다(engine):

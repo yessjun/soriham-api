@@ -537,6 +537,21 @@ def create_app(
     return app
 
 
+def console_file(root: Path, path: str) -> Path | None:
+    """요청 경로가 가리키는 빌드 파일. 폴더 밖이거나 없으면 None.
+
+    지금 쓰는 서버는 경로를 정규화해 상위 이동이 여기까지 오지 않지만, 파일을 여는
+    자리에서 봉쇄를 확인하지 않으면 서버를 바꿀 때 조용히 뚫린다.
+    """
+    if not path:
+        return None
+    base = root.resolve()
+    candidate = (base / path).resolve()
+    if not candidate.is_file() or not candidate.is_relative_to(base):
+        return None
+    return candidate
+
+
 def _serve_console(app: FastAPI, root: Path) -> None:
     """콘솔 빌드를 같은 오리진에서 서빙한다.
 
@@ -552,10 +567,7 @@ def _serve_console(app: FastAPI, root: Path) -> None:
     def console(path: str) -> Response:
         # 있는 파일이면 그대로, 아니면 index.html. 클라이언트 라우팅이라 /s/<토큰>이나
         # /recordings/<id>로 새로고침해도 여기로 온다
-        candidate = (root / path).resolve()
-        if path and candidate.is_file() and candidate.is_relative_to(root.resolve()):
-            return FileResponse(candidate)
-        return FileResponse(index)
+        return FileResponse(console_file(root, path) or index)
 
 
 def _apply_filters(
