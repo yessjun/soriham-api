@@ -26,6 +26,18 @@ from soriham_api.ratelimit import (
 SMALL = Limit(max_attempts=3, window=timedelta(minutes=15))
 
 
+@pytest.fixture
+def 창_고정(monkeypatch: pytest.MonkeyPatch):
+    """고정 창은 매시 :00, :15, :30, :45에 새 행으로 넘어간다.
+
+    한도까지 두드리는 시험이 그 경계를 밟으면 카운터가 리셋돼 마지막 요청이 통과한다.
+    argon2가 한 번에 수십 밀리초라 30여 번을 두드리는 데 몇 초가 걸리고, 실제로 CI가
+    20:00:00을 밟아 빨갛게 났다.
+    """
+    frozen = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(Limit, "start_of", lambda self, now: frozen)
+
+
 def test_올린_만큼_센다(db):
     assert [hit(db, "k", limit=SMALL) for _ in range(3)] == [1, 2, 3]
     assert count_of(db, "k", limit=SMALL) == 3
@@ -137,7 +149,7 @@ def client(engine, db, owner):
     )
 
 
-def test_로그인을_두드리면_막힌다(client, owner):
+def test_로그인을_두드리면_막힌다(client, owner, 창_고정):
     from conftest import TEST_PASSWORD
 
     codes = []
@@ -180,7 +192,7 @@ def test_막을_때도_카운터가_남는다(client, db, owner):
     assert db.scalar(select(func.sum(AuthAttempt.count))) >= 3
 
 
-def test_가입도_두드리면_막힌다(client):
+def test_가입도_두드리면_막힌다(client, 창_고정):
     codes = []
     for i in range(PER_SOURCE.max_attempts + 2):
         codes.append(
@@ -194,7 +206,7 @@ def test_가입도_두드리면_막힌다(client):
     assert codes[-1] == 429
 
 
-def test_링크_비밀번호도_두드리면_막힌다(client, db, workspace, owner):
+def test_링크_비밀번호도_두드리면_막힌다(client, db, workspace, owner, 창_고정):
     from conftest import login
     from soriham_api.models import Recording
 
