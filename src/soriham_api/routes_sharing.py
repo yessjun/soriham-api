@@ -66,6 +66,15 @@ PUBLIC_HEADERS = {
     "referrer-policy": "no-referrer",
 }
 _LINK_GONE = "링크가 유효하지 않습니다"
+# 링크 열람자에게는 처리 중인지 아닌지만 말한다. 내부 상태를 그대로 내보내면
+# quota_blocked가 소유자의 한도 상태를 알려 준다
+_PUBLIC_STATUS = {
+    "done": "done",
+    "error": "unavailable",
+    "missing": "unavailable",
+    "duplicate": "unavailable",
+    "quota_blocked": "unavailable",
+}
 
 
 def register(app: FastAPI, deps: Deps) -> None:
@@ -334,7 +343,7 @@ def register(app: FastAPI, deps: Deps) -> None:
             summary=recording.summary,
             recorded_at=recording.recorded_at,
             duration_sec=recording.duration_sec,
-            status=recording.status,
+            status=_PUBLIC_STATUS.get(recording.status, "processing"),
             language=recording.language,
             tags=[tag_out(t) for t in recording.tags],
             progress=recording.progress,

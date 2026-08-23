@@ -26,6 +26,17 @@ from .ratelimit import Limit, TooManyAttempts
 CSRF_HEADER = "x-csrf-token"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
+# 같은 판단이 표면마다 다른 문구를 내면 사용자가 상태를 오해한다
+_STATUS_MESSAGES = {
+    "pending": "관리자 승인 대기 중입니다",
+    "rejected": "가입이 거절된 계정입니다",
+    "disabled": "사용이 중지된 계정입니다",
+}
+
+
+def _status_message(status: str | None) -> str:
+    return _STATUS_MESSAGES.get(status or "", "사용할 수 없는 계정입니다")
+
 
 @dataclass(frozen=True)
 class WorkspaceContext:
@@ -89,10 +100,8 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
         return user
 
     def require_active(user: User = Depends(require_user)) -> User:
-        if user.status == "pending":
-            raise HTTPException(403, "관리자 승인 대기 중입니다")
         if user.status != "active":
-            raise HTTPException(403, "사용할 수 없는 계정입니다")
+            raise HTTPException(403, _status_message(user.status))
         return user
 
     def require_service_admin(user: User = Depends(require_active)) -> User:
@@ -139,8 +148,9 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
                 raise HTTPException(401, "로그인이 필요합니다")
             # 조회보다 먼저 본다. 뒤에 두면 대기 중인 사람이 있는 id에는 403을,
             # 없는 id에는 404를 받아 존재가 드러난다
-            if _blocked_account(session, principal):
-                raise HTTPException(403, "관리자 승인 대기 중입니다")
+            blocked = _blocked_status(session, principal)
+            if blocked is not None:
+                raise HTTPException(403, _status_message(blocked))
             recording = session.scalar(
                 select(Recording)
                 .where(Recording.public_id == public_id)
@@ -183,11 +193,12 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
                 ratelimit.clear(session, key)
             session.commit()
 
-    def _blocked_account(session: Session, principal: Principal) -> bool:
+    def _blocked_status(session: Session, principal: Principal) -> str | None:
+        """막아야 할 계정이면 그 상태를, 아니면 None."""
         if principal.user_id is None:
-            return False
+            return None
         status = session.scalar(select(User.status).where(User.id == principal.user_id))
-        return status != "active"
+        return None if status == "active" else status
 
     return Deps(
         cfg=cfg,

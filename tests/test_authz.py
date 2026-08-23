@@ -481,3 +481,26 @@ def test_처리_배속은_남의_실측으로도_낸다(app_client, db, mine, ot
 
     assert body["speed_ratio"] == pytest.approx(0.2)
     assert body["eta_sec"] == pytest.approx(120.0)
+
+
+def test_계정_상태마다_다른_문구를_준다(app_client, db, workspace, mine):
+    """같은 판단이 표면마다 다른 문구를 내면 사용자가 상태를 오해한다."""
+    blocked = create_user(
+        db,
+        email="blocked@example.com",
+        password_hash=auth.hash_password(TEST_PASSWORD),
+        display_name="중지",
+        status="active",
+    )
+    add_member(db, workspace, blocked, "member")
+    db.commit()
+    login(app_client, blocked.email)
+    blocked.status = "disabled"
+    db.commit()
+
+    detail = app_client.get(f"/api/recordings/{mine.public_id}")
+    listing = app_client.get(f"/api/workspaces/{workspace.public_id}/recordings")
+
+    assert detail.status_code == listing.status_code == 403
+    assert detail.json()["detail"] == "사용이 중지된 계정입니다"
+    assert listing.json()["detail"] == detail.json()["detail"]

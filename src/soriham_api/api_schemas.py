@@ -151,8 +151,13 @@ class PendingUserOut(BaseModel):
     id: uuid.UUID
     email: str
     name: str
+    status: str
     signup_note: str | None
     requested_at: datetime
+
+
+class AccountStatusIn(BaseModel):
+    status: str
 
 
 class MemberOut(BaseModel):

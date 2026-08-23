@@ -447,3 +447,19 @@ def test_다_쓴_초대는_승인_때도_이어지지_않는다(db, workspace):
         )
         is None
     )
+
+
+def test_형식이_아닌_이메일로는_가입할_수_없다(db):
+    """가입은 형식을 안 보고 공유만 봐서, @ 없는 주소로 가입한 실존 계정에 공유하면
+    422가 나는 조합이 있었다."""
+    from soriham_api.tenancy import MemberInvalid
+
+    with pytest.raises(MemberInvalid):
+        signup(db, email="골뱅이없음", password="암구호", display_name="이상")
+
+
+def test_형식이_아닌_이메일로는_초대할_수_없다(db, workspace):
+    from soriham_api.tenancy import MemberInvalid
+
+    with pytest.raises(MemberInvalid):
+        create_invite(db, workspace=workspace, email="골뱅이없음")
