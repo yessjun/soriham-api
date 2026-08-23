@@ -168,11 +168,16 @@ def signup(
     display_name: str,
     signup_note: str | None = None,
     auto_approve: bool = False,
+    quota_minutes: int | None = None,
+    quota_bytes: int | None = None,
 ) -> SignupResult:
     """가입 신청. 대기 상태로 계정과 개인 워크스페이스를 함께 만든다.
 
     워크스페이스를 승인 때가 아니라 여기서 만드는 이유: 승인이 상태 한 번 뒤집기로
     끝나면 승인 경로에 실패할 자리가 없다. 거절하면 함께 지운다.
+
+    한도는 호출자가 설정에서 읽어 넘긴다. 여기서 기본값을 비워 두면 승인이 곧
+    무제한이 되어 한도 장치 전체가 아무도 막지 않는다.
     """
     normalized = normalize_email(email)
     if find_user(session, normalized) is not None:
@@ -191,6 +196,8 @@ def signup(
         slug=unique_slug(session, normalized.split("@")[0]),
         name=f"{display_name}의 보관함",
         kind="personal",
+        quota_minutes=quota_minutes,
+        quota_bytes=quota_bytes,
     )
     add_member(session, workspace, user, "owner")
     user.default_workspace_id = workspace.id
@@ -200,7 +207,14 @@ def signup(
     return SignupResult(user=user, workspace=workspace)
 
 
-def approve(session: Session, user: User, *, reviewer: User | None = None) -> User:
+def approve(
+    session: Session,
+    user: User,
+    *,
+    reviewer: User | None = None,
+    quota_minutes: int | None = None,
+    quota_bytes: int | None = None,
+) -> User:
     """승인. 가입 전에 이메일로 걸어둔 공유와 초대가 이때 실체가 된다.
 
     거절이 개인 워크스페이스를 지우므로, 되돌리는 승인은 그것도 되돌려야 한다.
@@ -210,12 +224,18 @@ def approve(session: Session, user: User, *, reviewer: User | None = None) -> Us
     user.reviewed_by_user_id = reviewer.id if reviewer is not None else None
     user.reviewed_at = datetime.now(UTC)
     session.flush()
-    _ensure_home_workspace(session, user)
+    _ensure_home_workspace(session, user, quota_minutes=quota_minutes, quota_bytes=quota_bytes)
     claim_pending(session, user)
     return user
 
 
-def _ensure_home_workspace(session: Session, user: User) -> Workspace | None:
+def _ensure_home_workspace(
+    session: Session,
+    user: User,
+    *,
+    quota_minutes: int | None = None,
+    quota_bytes: int | None = None,
+) -> Workspace | None:
     """이 사람이 쓸 워크스페이스가 하나도 없으면 개인 워크스페이스를 만들어 준다."""
     joined = session.scalar(
         select(func.count(WorkspaceMember.id)).where(WorkspaceMember.user_id == user.id)
@@ -232,6 +252,8 @@ def _ensure_home_workspace(session: Session, user: User) -> Workspace | None:
         slug=unique_slug(session, user.email.split("@")[0]),
         name=f"{user.display_name}의 보관함",
         kind="personal",
+        quota_minutes=quota_minutes,
+        quota_bytes=quota_bytes,
     )
     add_member(session, workspace, user, "owner")
     user.default_workspace_id = workspace.id

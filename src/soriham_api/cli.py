@@ -101,7 +101,13 @@ def main(argv: list[str] | None = None) -> int:
                 session.commit()
                 print(f"거절했습니다: {user.email}")
             else:
-                approve(session, user)
+                # 설정의 기본 한도를 함께 넘긴다. 안 넘기면 승인이 곧 무제한이 된다
+                approve(
+                    session,
+                    user,
+                    quota_minutes=settings.default_quota_minutes,
+                    quota_bytes=settings.default_quota_bytes,
+                )
                 session.commit()
                 print(f"승인했습니다: {user.email}")
         return 0
@@ -133,7 +139,14 @@ def main(argv: list[str] | None = None) -> int:
             if find_workspace(session, args.slug) is not None:
                 print(f"이미 있습니다: {args.slug}")
                 return 0
-            workspace = create_workspace(session, slug=args.slug, name=args.name, kind=args.kind)
+            workspace = create_workspace(
+                session,
+                slug=args.slug,
+                name=args.name,
+                kind=args.kind,
+                quota_minutes=settings.default_quota_minutes,
+                quota_bytes=settings.default_quota_bytes,
+            )
             session.commit()
             print(f"만들었습니다: {workspace.slug} ({workspace.public_id})")
         return 0

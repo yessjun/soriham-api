@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from conftest import login, make_settings
 from soriham_api.app import create_app
-from soriham_api.models import JobLog, Recording, Segment
+from soriham_api.models import JobLog, Recording, Segment, Workspace
 from soriham_api.quota import QuotaExceeded, check_minutes, check_storage, measure
 from soriham_api.worker import process_one, release_quota_blocked
 from test_worker import FakeRunnerClient
@@ -305,3 +305,75 @@ def test_한도로_보류된_녹음은_완료_비율의_분모에서_빠진다(c
     body = client.get(f"/api/workspaces/{workspace.public_id}/stats").json()
 
     assert body["done_ratio"] == pytest.approx(1.0)
+
+
+def test_가입으로_생긴_워크스페이스에_기본_한도가_걸린다(engine, db, tmp_path):
+    """승인이 곧 무제한이 아니라는 것을 실제로 만드는 자리다.
+
+    한도 장치는 다 있었는데 새 워크스페이스의 한도가 비어 있어 아무도 막히지 않았다.
+    한도를 손으로 걸어 두고 시험하면 이 구멍이 영원히 안 보인다.
+    """
+    app = create_app(
+        settings=make_settings(default_quota_minutes=600, default_quota_bytes=1024),
+        session_factory=sessionmaker(bind=engine),
+    )
+    client = TestClient(app)
+
+    client.post(
+        "/api/auth/signup",
+        json={"email": "new@example.com", "password": "암구호", "display_name": "새사람"},
+    )
+
+    workspace = db.scalar(select(Workspace).where(Workspace.slug == "new"))
+    assert workspace.quota_minutes == 600
+    assert workspace.quota_bytes == 1024
+
+
+def test_기본_한도를_무제한으로_두면_걸리지_않는다(engine, db):
+    """소유자 혼자 쓰는 배치에서는 이렇게 꺼 둘 수 있어야 한다."""
+    app = create_app(
+        settings=make_settings(default_quota_minutes=None, default_quota_bytes=None),
+        session_factory=sessionmaker(bind=engine),
+    )
+
+    TestClient(app).post(
+        "/api/auth/signup",
+        json={"email": "free@example.com", "password": "암구호", "display_name": "자유"},
+    )
+
+    workspace = db.scalar(select(Workspace).where(Workspace.slug == "free"))
+    assert workspace.quota_minutes is None
+    assert workspace.quota_bytes is None
+
+
+def test_거절했다_승인하면_다시_만드는_워크스페이스도_한도를_받는다(engine, db):
+    """복구 경로가 한도를 빠뜨리면 거절 한 번이 무제한 계정을 만드는 수단이 된다."""
+    from soriham_api.tenancy import approve, reject, signup
+
+    result = signup(db, email="again@example.com", password="암구호", display_name="다시")
+    reject(db, result.user)
+    db.commit()
+
+    approve(db, result.user, quota_minutes=300, quota_bytes=2048)
+    db.commit()
+
+    workspace = db.get(Workspace, result.user.default_workspace_id)
+    assert workspace.quota_minutes == 300
+    assert workspace.quota_bytes == 2048
+
+
+def test_부트스트랩_워크스페이스는_무제한이다(db):
+    """소유자의 백로그 1만 시간이 자기 한도에 걸리면 안 된다."""
+    from soriham_api.tenancy import bootstrap
+
+    _user, workspace, _created = bootstrap(
+        db,
+        email="boot@example.com",
+        password="암구호",
+        display_name="운영자",
+        workspace_slug="boot-ws",
+        workspace_name="보관함",
+    )
+
+    assert workspace.quota_minutes is None
+    assert workspace.quota_bytes is None

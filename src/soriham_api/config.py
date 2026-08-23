@@ -24,6 +24,10 @@ class Settings:
     - COOKIE_SECURE: 세션 쿠키에 Secure를 붙일지 (기본 켬, 로컬 http 개발만 끈다)
     - COOKIE_NAME / COOKIE_DOMAIN: 세션 쿠키 이름과 도메인 (도메인을 비우면 host-only)
     - AUTO_APPROVE: 가입을 승인 없이 바로 활성으로 (기본 끔 — 승인제)
+    - DEFAULT_MONTHLY_MINUTES / DEFAULT_STORAGE_GB: 새로 생기는 워크스페이스의 한도.
+      **승인이 곧 무제한이 아니라는 것을 실제로 만드는 값이다.** `unlimited`를 넣으면
+      무제한이 되지만 그러면 아무도 막히지 않는다. 소유자의 스캔 워크스페이스는
+      부트스트랩이 따로 무제한으로 만든다
     - EXPOSE_DOCS: /docs, /openapi.json 노출 여부 (기본 끔)
     - MAX_UPLOAD_MB: 업로드 한 건의 크기 상한 (기본 4096)
     - ENRICH_BACKEND: 제목/요약/태그 생성 백엔드 (ollama | claude | off)
@@ -43,6 +47,8 @@ class Settings:
     cookie_secure: bool
     cookie_domain: str | None
     auto_approve: bool
+    default_quota_minutes: int | None
+    default_quota_bytes: int | None
     expose_docs: bool
     max_upload_bytes: int
     enrich_backend: str
@@ -79,12 +85,31 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         cookie_secure=_flag(e, "COOKIE_SECURE", default=True),
         cookie_domain=e.get("COOKIE_DOMAIN") or None,
         auto_approve=_flag(e, "AUTO_APPROVE", default=False),
+        default_quota_minutes=_quota(e, "DEFAULT_MONTHLY_MINUTES", default=600),
+        default_quota_bytes=_gb_to_bytes(_quota(e, "DEFAULT_STORAGE_GB", default=20)),
         expose_docs=_flag(e, "EXPOSE_DOCS", default=False),
         max_upload_bytes=int(e.get("MAX_UPLOAD_MB") or 4096) * 1024 * 1024,
         enrich_backend=e.get("ENRICH_BACKEND") or "ollama",
         ollama_url=e.get("OLLAMA_URL") or "http://localhost:11434",
         ollama_model=e.get("OLLAMA_MODEL") or "qwen3:8b",
     )
+
+
+def _quota(e: dict[str, str], key: str, *, default: int) -> int | None:
+    """한도 설정값. `unlimited`(또는 빈 값 아닌 0)는 무제한을 뜻한다."""
+    raw = (e.get(key) or "").strip()
+    if not raw:
+        return default
+    if raw.lower() in ("unlimited", "none", "무제한"):
+        return None
+    value = int(raw)
+    if value <= 0:
+        raise RuntimeError(f"{key}는 양수이거나 unlimited여야 합니다: {raw}")
+    return value
+
+
+def _gb_to_bytes(gb: int | None) -> int | None:
+    return None if gb is None else gb * 1024 * 1024 * 1024
 
 
 def _flag(e: dict[str, str], key: str, *, default: bool) -> bool:
