@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .models import User, UserSession
@@ -151,3 +151,22 @@ def revoke_other_sessions(
         revoked += 1
     db.flush()
     return revoked
+
+
+# 만료·폐기된 세션을 얼마나 두고 지울지. 바로 지우지 않는 것은 "언제 어디서 로그인했나"를
+# 잠깐이나마 볼 수 있게 남겨 두기 위해서다
+SESSION_KEEP_AFTER = timedelta(days=7)
+
+
+def sweep_sessions(db: Session, *, now: datetime | None = None) -> int:
+    """죽은 세션 행을 치운다. 안 치우면 이 표가 로그인 횟수만큼 자란다."""
+    now = now or datetime.now(UTC)
+    cutoff = now - SESSION_KEEP_AFTER
+    result = db.execute(
+        delete(UserSession).where(
+            (UserSession.absolute_expires_at < cutoff)
+            | (UserSession.expires_at < cutoff)
+            | (UserSession.revoked_at < cutoff)
+        )
+    )
+    return result.rowcount or 0

@@ -35,6 +35,7 @@ from .permissions import (
     can_see_speaker_names,
     resolve_own_perm,
 )
+from .ratelimit import PER_SOURCE, PER_TARGET, source_key, target_key
 from .serializers import eta_sec, recording_summary, segment_out, tag_out
 from .sharing import (
     LinkInvalid,
@@ -263,6 +264,7 @@ def register(app: FastAPI, deps: Deps) -> None:
     def unlock(
         token: str,
         body: UnlockIn,
+        request: Request,
         response: Response,
         session: Session = Depends(db),
     ) -> Response:
@@ -271,12 +273,19 @@ def register(app: FastAPI, deps: Deps) -> None:
         CSRF 헤더를 요구하지 않는다 — 세션이 없는 사람이 쓰는 길이고, 남의 브라우저가
         이 요청을 대신 보내려면 토큰과 비밀번호를 이미 알아야 한다.
         """
+        ip = request.client.host if request.client else None
+        # 인터넷에 열린 argon2 호출이 로그인 말고 여기 하나 더 있다. 토큰을 가진
+        # 사람이 비밀번호를 무한정 두드리는 것을 막는다
+        deps.guard_attempts(
+            [(source_key("unlock", ip), PER_SOURCE), (target_key("unlock", ip, token), PER_TARGET)]
+        )
         link, _recording = _open(session, token)
         if link.password_hash is None:
             # 잠기지 않은 링크에 대고 부른 것이다. 쿠키를 주지 않고 조용히 끝낸다
             return Response(status_code=204, headers=PUBLIC_HEADERS)
         if not auth.verify_password(link.password_hash, body.password):
             raise HTTPException(403, "비밀번호가 올바르지 않습니다")
+        deps.clear_attempts([source_key("unlock", ip), target_key("unlock", ip, token)])
         out = Response(status_code=204, headers=PUBLIC_HEADERS)
         out.set_cookie(
             LINK_COOKIE,

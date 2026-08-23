@@ -21,6 +21,7 @@ from .api_schemas import (
 )
 from .deps import Deps, user_workspaces
 from .models import User, Workspace, WorkspaceMember
+from .ratelimit import PER_SOURCE, PER_TARGET, source_key, target_key
 from .tenancy import EmailTaken, approve, find_user, reject, signup
 
 # 로그인 실패 문구는 어느 쪽이 틀렸는지 알려주지 않는다
@@ -123,6 +124,10 @@ def register(app: FastAPI, deps: Deps) -> None:
             raise HTTPException(422, "비밀번호가 비어 있습니다")
         if not body.display_name.strip():
             raise HTTPException(422, "이름이 비어 있습니다")
+        # 가입은 대상 축이 없다 — 아직 없는 이메일이다. 출처만 센다
+        deps.guard_attempts(
+            [(source_key("signup", request.client.host if request.client else None), PER_SOURCE)]
+        )
         try:
             result = signup(
                 session,
@@ -158,6 +163,12 @@ def register(app: FastAPI, deps: Deps) -> None:
         response: Response,
         session: Session = Depends(deps.db),
     ) -> MeOut:
+        ip = request.client.host if request.client else None
+        src = source_key("login", ip)
+        pair = target_key("login", ip, body.email.strip().lower())
+        # **argon2보다 먼저다.** 한 번에 64MiB를 쓰는 호출이라 제한이 뒤에 있으면
+        # 시도 제한이 아니라 메모리 고갈 표면이 된다
+        deps.guard_attempts([(src, PER_SOURCE), (pair, PER_TARGET)])
         user = find_user(session, body.email)
         stored = user.password_hash if user is not None else None
         # 계정이 없어도 같은 검증을 돌린다 — 응답 시간이 존재 여부를 알려주지 않게
@@ -169,6 +180,8 @@ def register(app: FastAPI, deps: Deps) -> None:
         if user.status == "disabled":
             raise HTTPException(403, "사용이 중지된 계정입니다")
 
+        # 성공했으니 이 축들은 지운다. 실패만 쌓여야 정상 사용자가 안 막힌다
+        deps.clear_attempts([src, pair])
         if auth.needs_rehash(user.password_hash):
             user.password_hash = auth.hash_password(body.password)
         user.last_login_at = func.now()
@@ -214,6 +227,9 @@ def register(app: FastAPI, deps: Deps) -> None:
         session: Session = Depends(deps.db),
         _: None = Depends(deps.require_csrf),
     ) -> Response:
+        deps.guard_attempts(
+            [(source_key("password", request.client.host if request.client else None), PER_SOURCE)]
+        )
         if not auth.verify_password(user.password_hash, body.current_password):
             raise HTTPException(403, "현재 비밀번호가 올바르지 않습니다")
         if not body.new_password.strip():

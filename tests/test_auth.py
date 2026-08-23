@@ -176,3 +176,36 @@ def test_대기_상태로도_계정은_만들어진다(db):
     )
     db.commit()
     assert db.scalar(select(User.status).where(User.id == u.id)) == "pending"
+
+
+def test_죽은_세션은_치운다(db, user):
+    """안 치우면 이 표가 로그인 횟수만큼 자란다."""
+    from datetime import timedelta
+
+    from soriham_api.auth import SESSION_KEEP_AFTER, sweep_sessions
+    from soriham_api.models import UserSession
+
+    live = auth.create_session(db, user).session
+    old = auth.create_session(db, user).session
+    old.expires_at = datetime.now(UTC) - SESSION_KEEP_AFTER - timedelta(days=1)
+    old.absolute_expires_at = old.expires_at
+    db.commit()
+
+    assert sweep_sessions(db) == 1
+    remaining = db.scalars(select(UserSession.id)).all()
+    assert remaining == [live.id]
+
+
+def test_아직_안_지난_세션은_남긴다(db, user):
+    """만료되자마자 지우면 "언제 어디서 로그인했나"를 볼 수 없다."""
+    from datetime import timedelta
+
+    from soriham_api.auth import sweep_sessions
+    from soriham_api.models import UserSession
+
+    just_expired = auth.create_session(db, user).session
+    just_expired.expires_at = datetime.now(UTC) - timedelta(hours=1)
+    db.commit()
+
+    assert sweep_sessions(db) == 0
+    assert db.scalars(select(UserSession.id)).all() == [just_expired.id]
