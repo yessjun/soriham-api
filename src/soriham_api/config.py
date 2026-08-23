@@ -70,7 +70,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     _reject_overlap(dirs, upload_dir)
     origins = tuple(
         o.strip()
-        for o in (e.get("CORS_ORIGINS") or "http://localhost:5174").split(",")
+        for o in (e.get("CORS_ORIGINS") or "http://localhost:5173").split(",")
         if o.strip()
     )
     _reject_wildcard_origin(origins)
