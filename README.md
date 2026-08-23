@@ -32,19 +32,31 @@ uv run soriham-api serve    # REST API (기본 8200 포트)
 |---|---|
 | `POST /api/auth/signup` · `login` · `logout` | 가입·로그인·로그아웃 |
 | `GET /api/auth/me` | 내 계정, 워크스페이스 목록, 화면이 그릴 것들 |
-| `GET·POST /api/admin/pending…` | 승인 대기 목록과 승인·거절 |
+| `POST /api/auth/password` | 비밀번호 변경 (다른 자리의 세션은 폐기) |
+| `GET /api/admin/users?status=` | 상태로 거른 계정 목록 |
+| `PUT /api/admin/users/{id}/status` | 승인·거절·중지·재개 |
+| `POST /api/workspaces` | 워크스페이스 생성 (서비스 관리자만) |
 | `GET /api/workspaces/{ws}/recordings` | 목록 (q, status, tag 필터, 페이지네이션) |
-| `GET /api/recordings/{id}` | 상세 (세그먼트, 화자 이름, 태그) |
-| `PATCH /api/recordings/{id}` | 제목 수정 |
-| `DELETE /api/recordings/{id}` | 삭제 (업로드본은 원본 파일까지, 스캔본은 등록만) |
-| `PUT /api/recordings/{id}/speakers/{key}` | 화자 표시 이름 수정 |
-| `GET /api/recordings/{id}/audio` | 오디오 스트리밍 (Range 지원) |
-| `POST·DELETE /api/recordings/{id}/tags…` | 태그 추가·제거 |
 | `POST /api/workspaces/{ws}/recordings` | 업로드 |
 | `GET /api/workspaces/{ws}/tags` | 태그 목록 |
 | `GET /api/workspaces/{ws}/search?q=` | 검색 (세그먼트·파일명·제목·요약) |
 | `GET /api/workspaces/{ws}/stats` | 상태별 집계, 처리 배속, ETA, 최근 에러 |
 | `GET /api/workspaces/{ws}/usage` | 사용량과 한도 (전사 시간 30일 롤링, 저장 용량) |
+| `GET·PUT·DELETE /api/workspaces/{ws}/members…` | 구성원 목록과 역할 변경, 내보내기 |
+| `GET·POST·DELETE /api/workspaces/{ws}/invites…` | 초대 발급·목록·철회 |
+| `GET·POST /api/invites/{token}…` | 초대 미리보기와 수락 |
+| `GET /api/recordings/{id}` | 상세 (세그먼트, 화자 이름, 태그) |
+| `PATCH /api/recordings/{id}` | 제목 수정 |
+| `DELETE /api/recordings/{id}` | 삭제 (업로드본은 원본 파일까지, 스캔본은 등록만) |
+| `POST /api/recordings/{id}/retry` | 실패한 녹음을 다시 큐에 (남은 산출물부터 재개) |
+| `PUT /api/recordings/{id}/speakers/{key}` | 화자 표시 이름 수정 |
+| `GET /api/recordings/{id}/audio` | 오디오 스트리밍 (Range 지원) |
+| `POST·DELETE /api/recordings/{id}/tags…` | 태그 추가·제거 |
+| `GET·POST·DELETE /api/recordings/{id}/shares…` | 사람 지정 공유 (열람·편집) |
+| `POST·DELETE /api/recordings/{id}/links…` | 공유 링크 발급·철회 |
+| `GET /api/shared-with-me` | 나에게 공유된 녹음 |
+| `GET /api/shared/{token}` · `/audio` | 로그인 없는 링크 열람과 재생 |
+| `POST /api/shared/{token}/unlock` | 비밀번호가 걸린 링크 열기 |
 
 id는 전부 uuid(공개 식별자)입니다. 스캔·감시로 들어온 원본 오디오는 제자리
 인덱싱하며 이동·복사하지 않고, 업로드본만 보관 폴더의 워크스페이스별 하위 경로에

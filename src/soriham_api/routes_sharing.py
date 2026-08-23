@@ -281,7 +281,7 @@ def register(app: FastAPI, deps: Deps) -> None:
             return
         if is_unlocked(link, request.cookies.get(LINK_COOKIE)):
             return
-        # 오디오만 막으면 요약이 비밀번호 없이 샌다. 상세도 같은 관문을 지난다
+        # 오디오만 막으면 요약이 비밀번호 없이 샌다. 상세도 같은 검사를 지난다
         raise HTTPException(401, "비밀번호가 필요합니다")
 
     @app.post("/api/shared/{token}/unlock", status_code=204)

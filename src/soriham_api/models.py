@@ -71,7 +71,7 @@ class TimestampMixin:
 
 
 class User(TimestampMixin, Base):
-    """서비스 사용자. 가입은 열려 있고 `status`가 관문이다 (승인제)."""
+    """서비스 사용자. 가입은 열려 있고 쓸 수 있는지는 `status`가 정한다(승인제)."""
 
     __tablename__ = "users"
     __table_args__ = (
