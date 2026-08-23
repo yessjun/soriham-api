@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, func, or_, select, update
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 import soriham_api
@@ -104,6 +104,7 @@ def create_app(
     # 권한 등급마다 한 번씩만 만든다. 경로 파라미터로 녹음을 얻는 길은 이 둘뿐이다
     viewable = deps.recording_at(Perm.VIEW)
     editable = deps.recording_at(Perm.EDIT)
+    manageable = deps.recording_at(Perm.MANAGE)
     register_auth_routes(app, deps)
 
     @app.get("/api/workspaces/{workspace_id}/recordings", response_model=RecordingList)
@@ -290,6 +291,49 @@ def create_app(
                 404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)"
             ) from None
         return _range_response(path, request.headers.get("range"))
+
+    @app.delete("/api/recordings/{public_id}", status_code=204)
+    def delete_recording(
+        recording: Recording = Depends(manageable),
+        session: Session = Depends(db),
+        _: None = Depends(deps.require_csrf),
+    ) -> Response:
+        """녹음을 지운다. 저장 용량 한도를 걸면서 이 길이 없으면 한도가 일방통행이 된다.
+
+        업로드본은 디스크 원본까지 지우지만 **스캔본은 DB 행만** 지운다 — 주인의
+        원본 파일을 서비스가 지우지 않는다. 처리 이력은 남는다: 지워진다면
+        올리고-전사하고-지우고를 반복해 사용량 한도를 되돌릴 수 있다.
+        """
+        if recording.source == "upload":
+            workspace = session.get(Workspace, recording.workspace_id)
+            try:
+                path = resolve_audio_path(
+                    recording.path,
+                    source="upload",
+                    workspace_public_id=workspace.public_id,
+                    upload_dir=cfg.upload_dir,
+                    audio_dirs=cfg.audio_dirs,
+                )
+            except AudioUnavailable:
+                # 이미 없거나 뿌리 밖이면 행만 지운다. 뿌리 밖 경로를 여기서 지우면
+                # 봉쇄 검사를 삭제로 우회하는 길이 열린다
+                path = None
+            if path is not None:
+                path.unlink(missing_ok=True)
+        # 이 녹음을 원본으로 삼아 중복 처리된 행들을 되살린다. 안 되살리면 원본 없는
+        # duplicate로 남아 워커가 집지 않고 재스캔도 못 살린다 — 파일은 폴더에 있는데
+        # 아카이브에는 내용이 없는 상태가 된다
+        session.execute(
+            update(Recording)
+            .where(
+                Recording.duplicate_of_id == recording.id,
+                Recording.status == "duplicate",
+            )
+            .values(status="pending", duplicate_of_id=None)
+        )
+        session.delete(recording)
+        session.commit()
+        return Response(status_code=204)
 
     @app.post("/api/recordings/{public_id}/tags", response_model=list[TagOut])
     def add_tag(
