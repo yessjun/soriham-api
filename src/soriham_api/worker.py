@@ -15,9 +15,11 @@ from typing import Protocol
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from soriham_api.auth import sweep_sessions
 from soriham_api.ingest import resume_status
 from soriham_api.models import JobLog, Recording, Segment, Workspace
 from soriham_api.quota import allows_transcription
+from soriham_api.ratelimit import sweep as sweep_attempts
 from soriham_api.stt_client import RunnerClient
 
 logger = logging.getLogger(__name__)
@@ -76,11 +78,21 @@ def idle_maintenance(session_factory: sessionmaker[Session]) -> None:
 
     한도 해제를 기동 시에만 보면 데몬이 재시작될 때까지 풀리지 않는다. 30일 창이
     지나도, 관리자가 한도를 올려도 그대로 서 있는다.
+
+    죽은 세션과 지난 시도 기록도 여기서 치운다. 웹 프로세스에 얹으면 요청 하나가
+    느려지고, 별도 스케줄러를 두면 배포에 프로세스가 하나 더 는다. 워커는 어차피
+    상시 돌고 유휴 시간이 있다.
     """
     with session_factory() as session:
         released = release_quota_blocked(session)
+        swept = sweep_sessions(session)
+        attempts = sweep_attempts(session)
+        if swept or attempts:
+            session.commit()
     if released:
         logger.info("한도가 풀려 %d건을 큐로 되돌림", released)
+    if swept or attempts:
+        logger.info("정리: 죽은 세션 %d건, 지난 시도 기록 %d건", swept, attempts)
 
 
 def release_quota_blocked(session: Session) -> int:

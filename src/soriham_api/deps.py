@@ -15,10 +15,11 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
-from . import auth
+from . import auth, ratelimit
 from .config import Settings
 from .models import Recording, User, Workspace, WorkspaceMember
 from .permissions import Perm, Principal, resolve_recording_perm, resolve_workspace_perm
+from .ratelimit import Limit, TooManyAttempts
 
 # 안전하지 않은 메서드에만 CSRF 헤더를 요구한다. GET을 면제하는 것이 <audio> 태그가
 # 도는 보증이다 — 그 태그는 헤더를 실을 수 없다
@@ -46,6 +47,8 @@ class Deps:
     workspace_ctx: Callable[..., WorkspaceContext]
     recording_at: Callable[[Perm], Callable[..., Recording]]
     require_service_admin: Callable[..., User]
+    guard_attempts: Callable[..., None]
+    clear_attempts: Callable[..., None]
     upload_lock: object
 
 
@@ -157,6 +160,29 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
 
         return dep
 
+    def guard_attempts(keys: list[tuple[str, Limit]]) -> None:
+        """시도를 세고 넘으면 429. **argon2를 부르기 전에 놓는다.**
+
+        카운터는 요청 세션이 아니라 자기 세션에서 커밋한다. 요청 세션에 얹으면 라우트가
+        나중에 던지는 예외(로그인 실패는 401이다)의 롤백에 증가가 함께 쓸려 나가,
+        아무리 틀려도 카운터가 오르지 않는다.
+        """
+        with factory() as session:
+            try:
+                ratelimit.guard(session, keys)
+            except TooManyAttempts as exc:
+                # 막힌 시도의 증가분은 굳이 남기지 않는다. 창이 고정이라 이미 한도를
+                # 넘긴 값이 그 창 내내 막고, 더 올려 봐야 달라지는 것이 없다
+                raise HTTPException(429, str(exc)) from None
+            session.commit()
+
+    def clear_attempts(keys: list[str]) -> None:
+        """성공한 축을 지운다. 실패만 쌓여야 정상 사용자가 안 막힌다."""
+        with factory() as session:
+            for key in keys:
+                ratelimit.clear(session, key)
+            session.commit()
+
     def _blocked_account(session: Session, principal: Principal) -> bool:
         if principal.user_id is None:
             return False
@@ -174,6 +200,8 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
         workspace_ctx=workspace_ctx,
         recording_at=recording_at,
         require_service_admin=require_service_admin,
+        guard_attempts=guard_attempts,
+        clear_attempts=clear_attempts,
         upload_lock=upload_lock,
     )
 
