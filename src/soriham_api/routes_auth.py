@@ -142,8 +142,8 @@ def register(app: FastAPI, deps: Deps) -> None:
         session: Session = Depends(deps.db),
         _: None = Depends(deps.require_known_origin),
     ) -> MeOut:
-        if not body.password.strip():
-            raise HTTPException(422, "비밀번호가 비어 있습니다")
+        if len(body.password) < auth.PASSWORD_MIN:
+            raise HTTPException(422, f"비밀번호는 {auth.PASSWORD_MIN}자 이상이어야 합니다")
         if not body.display_name.strip():
             raise HTTPException(422, "이름이 비어 있습니다")
         # 가입은 대상 축이 없다 — 아직 없는 이메일이다. 출처만 센다
@@ -255,8 +255,8 @@ def register(app: FastAPI, deps: Deps) -> None:
         )
         if not auth.verify_password(user.password_hash, body.current_password):
             raise HTTPException(403, "현재 비밀번호가 올바르지 않습니다")
-        if not body.new_password.strip():
-            raise HTTPException(422, "새 비밀번호가 비어 있습니다")
+        if len(body.new_password) < auth.PASSWORD_MIN:
+            raise HTTPException(422, f"비밀번호는 {auth.PASSWORD_MIN}자 이상이어야 합니다")
         user.password_hash = auth.hash_password(body.new_password)
         # 비밀번호가 바뀌면 다른 자리의 세션은 죽어야 한다. 지금 이 자리는 살린다
         current = getattr(request.state, "session_row", None)

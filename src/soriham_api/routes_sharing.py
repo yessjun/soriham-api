@@ -28,7 +28,7 @@ from .api_schemas import (
 )
 from .deps import Deps
 from .media import range_response
-from .models import Recording, RecordingShare, ShareLink, User, Workspace
+from .models import Recording, RecordingShare, ShareLink, User, Workspace, WorkspaceMember
 from .permissions import (
     Perm,
     Principal,
@@ -83,13 +83,23 @@ def register(app: FastAPI, deps: Deps) -> None:
     db = deps.db
     manageable = deps.recording_at(Perm.MANAGE)
 
-    def _share_out(share: RecordingShare, user: User | None) -> ShareOut:
+    def _share_out(share: RecordingShare, user: User | None, members: set[int]) -> ShareOut:
+        # 실명은 같은 워크스페이스 구성원일 때만 싣는다. 아무 이메일로 공유를 발급했다가
+        # 곧바로 철회하는 것만으로 그 주소의 가입 여부와 실명을 읽을 수 있으면,
+        # 로그인 응답에서 계정 존재를 감춘 것이 이 표면 하나로 무효가 된다
         return ShareOut(
             id=share.public_id,
             email=user.email if user is not None else share.invite_email or "",
-            name=user.display_name if user is not None else None,
+            name=user.display_name if user is not None and user.id in members else None,
             permission=share.permission,
             pending=user is None,
+        )
+
+    def _member_ids(session: Session, workspace_id: int) -> set[int]:
+        return set(
+            session.scalars(
+                select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
+            )
         )
 
     def _link_out(link: ShareLink) -> ShareLinkOut:
@@ -111,8 +121,9 @@ def register(app: FastAPI, deps: Deps) -> None:
         session: Session = Depends(db),
     ) -> SharePanelOut:
         workspace = session.get(Workspace, recording.workspace_id)
+        members = _member_ids(session, recording.workspace_id)
         return SharePanelOut(
-            users=[_share_out(s, u) for s, u in list_shares(session, recording)],
+            users=[_share_out(s, u, members) for s, u in list_shares(session, recording)],
             links=[_link_out(x) for x in list_links(session, recording)],
             workspace_name=workspace.name if workspace is not None else "",
         )
@@ -137,7 +148,7 @@ def register(app: FastAPI, deps: Deps) -> None:
             raise HTTPException(422, str(exc)) from None
         session.commit()
         target = session.get(User, share.user_id) if share.user_id is not None else None
-        return _share_out(share, target)
+        return _share_out(share, target, _member_ids(session, recording.workspace_id))
 
     @app.delete("/api/recordings/{public_id}/shares/{share_id}", status_code=204)
     def drop_share(

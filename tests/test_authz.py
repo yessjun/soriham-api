@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import sessionmaker
 
 from conftest import TEST_PASSWORD, login, make_settings
@@ -423,6 +423,8 @@ def test_남은_시간은_자기_대기분만_센다(app_client, db, mine, other
     from soriham_api.models import JobLog, Workspace
 
     ws = db.get(Workspace, mine.workspace_id)
+    # 픽스처가 이미 한 건 처리해 실측을 남겼다. 배속은 이 시험이 넣는 값만 봐야 한다
+    db.execute(delete(JobLog))
     mine.status = "pending"
     mine.duration_sec = 600.0
     theirs = Recording(
@@ -462,6 +464,8 @@ def test_처리_배속은_남의_실측으로도_낸다(app_client, db, mine, ot
     from soriham_api.models import JobLog, Workspace
 
     ws = db.get(Workspace, mine.workspace_id)
+    # 픽스처가 이미 한 건 처리해 실측을 남겼다. 배속은 이 시험이 넣는 값만 봐야 한다
+    db.execute(delete(JobLog))
     mine.status = "pending"
     mine.duration_sec = 600.0
     db.add(
@@ -544,7 +548,7 @@ def test_Origin이_없는_요청은_그대로_받는다(app_client, owner):
 def test_가입도_같은_검사를_지난다(app_client):
     resp = app_client.post(
         "/api/auth/signup",
-        json={"email": "new@example.com", "password": "암구호", "display_name": "새"},
+        json={"email": "new@example.com", "password": "가입용 시험 암구호", "display_name": "새"},
         headers={"origin": "https://evil.example"},
     )
 
@@ -589,3 +593,14 @@ def test_세그먼트는_상세에서만_읽는다(app_client, db, mine, owner, 
         assert hits != []
     finally:
         event.remove(engine, "before_cursor_execute", watch)
+
+
+def test_짧은_비밀번호로는_가입할_수_없다(app_client):
+    """시도 제한이 argon2 앞에 있어도, 네 자리 암구호는 IP를 바꿔 가며 두드리면 뚫린다."""
+    resp = app_client.post(
+        "/api/auth/signup",
+        json={"email": "short@example.com", "password": "짧다", "display_name": "짧"},
+    )
+
+    assert resp.status_code == 422
+    assert "8자" in resp.json()["detail"]

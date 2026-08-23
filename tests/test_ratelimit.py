@@ -198,7 +198,11 @@ def test_가입도_두드리면_막힌다(client, 창_고정):
         codes.append(
             client.post(
                 "/api/auth/signup",
-                json={"email": f"x{i}@example.com", "password": "암구호", "display_name": "x"},
+                json={
+                    "email": f"x{i}@example.com",
+                    "password": "가입용 시험 암구호",
+                    "display_name": "x",
+                },
             ).status_code
         )
 

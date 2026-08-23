@@ -632,3 +632,21 @@ def test_남의_페이지에서_보낸_잠금_해제는_거절한다(client, gue
     )
 
     assert resp.status_code == 403
+
+
+def test_공유_발급이_남의_실명을_알려주지_않는다(client, db, mine, friend, workspace):
+    """이메일 하나로 공유를 걸었다 풀기만 해도 가입 여부와 실명을 읽을 수 있으면,
+    로그인 응답에서 계정 존재를 감춘 것이 이 표면 하나로 무효가 된다."""
+    resp = client.post(
+        f"/api/recordings/{mine.public_id}/shares",
+        json={"email": friend.email, "permission": "view"},
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["name"] is None
+
+    # 같은 워크스페이스 구성원이면 이미 구성원 목록에서 보이는 이름이라 감출 것이 없다
+    add_member(db, workspace, friend, "member")
+    db.commit()
+    panel = client.get(f"/api/recordings/{mine.public_id}/shares").json()
+    assert [u["name"] for u in panel["users"]] == ["친구"]
