@@ -108,7 +108,7 @@ def check_minutes(usage: Usage, duration_sec: float | None) -> None:
 
 
 def allows_transcription(db: Session, recording: Recording, *, now: datetime | None = None) -> bool:
-    """워커가 러너에 보내기 직전에 보는 관문.
+    """워커가 러너에 보내기 직전에 하는 한도 검사.
 
     업로드 시점 검사를 스캔 유입분이 우회하고, 동시 업로드는 검사와 소비 사이에서
     경합한다. 단일 GPU라 여기가 직렬화 지점이고, 그래서 여기가 권위 있는 자리다.
