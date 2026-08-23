@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:18-alpine
+    # digest로 고정한다. 가변 태그는 언젠가 다른 이미지를 가리키고, 그때 무엇이
+    # 바뀌었는지 알 방법이 없다. 올릴 때는 태그를 확인하고 digest를 다시 적는다
+    image: postgres:18-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2
     environment:
       POSTGRES_DB: soriham
       POSTGRES_USER: soriham
