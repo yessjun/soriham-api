@@ -377,3 +377,68 @@ def test_부트스트랩_워크스페이스는_무제한이다(db):
 
     assert workspace.quota_minutes is None
     assert workspace.quota_bytes is None
+
+
+def test_전사_중에_지워도_사용_기록은_남는다(engine, db, workspace):
+    """이력이 작업과 같은 트랜잭션에 있으면 롤백에 함께 날아간다.
+
+    전사가 도는 사이 사용자가 녹음을 지우면 녹음 행 갱신이 충돌하고, 그 롤백이 GPU를
+    쓴 기록까지 지운다. 반복하면 전사 시간 한도를 우회할 수 있다.
+    """
+    from sqlalchemy.orm import Session
+
+    from soriham_api.models import JobLog
+
+    recording = make_recording(db, workspace, duration=3600.0, name="지워질것.wav")
+    rid = recording.id
+
+    class 도중에_지우는_러너(FakeRunnerClient):
+        def transcribe(self, *args, **kwargs):
+            with Session(engine) as other:
+                other.execute(Recording.__table__.delete().where(Recording.id == rid))
+                other.commit()
+            return super().transcribe(*args, **kwargs)
+
+    with Session(engine) as worker:
+        process_one(worker, 도중에_지우는_러너())
+
+    db.expire_all()
+    log = db.scalars(select(JobLog).where(JobLog.stage == "transcribe")).one()
+    assert log.workspace_id == workspace.id
+    assert log.recording_id is None
+    assert measure(db, workspace).used_minutes == pytest.approx(60.0)
+
+
+def test_거절이_사용_기록을_지우지_않는다(db):
+    """이력은 workspace_id에 CASCADE로 걸려 있다.
+
+    녹음만 보고 빈 워크스페이스를 지우면, 한도를 다 쓴 뒤 녹음 삭제 → 거절 → 재승인으로
+    사용량이 0으로 되돌아간다.
+    """
+    from soriham_api.tenancy import approve, reject, signup
+
+    result = signup(db, email="cycle@example.com", password="암구호", display_name="순환")
+    approve(db, result.user)
+    db.commit()
+    log_transcribe(db, result.workspace, minutes=500)
+
+    reject(db, result.user)
+    approve(db, result.user)
+    db.commit()
+
+    workspace = db.get(Workspace, result.user.default_workspace_id)
+    assert workspace.id == result.workspace.id
+    assert measure(db, workspace).used_minutes == pytest.approx(500.0)
+
+
+def test_녹음도_기록도_없으면_거절이_워크스페이스를_지운다(db):
+    """정리 자체는 그대로 돌아야 한다. 거절된 계정의 빈 워크스페이스가 쌓이면 치울 곳이 없다."""
+    from soriham_api.tenancy import reject, signup
+
+    result = signup(db, email="empty@example.com", password="암구호", display_name="빈")
+    db.commit()
+
+    reject(db, result.user)
+    db.commit()
+
+    assert db.get(Workspace, result.workspace.id) is None

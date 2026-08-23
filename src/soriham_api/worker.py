@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from soriham_api.auth import sweep_sessions
@@ -193,23 +194,35 @@ def _log_stage(
     meta: dict | None = None,
     error: str | None = None,
 ) -> None:
+    """처리 이력을 남긴다. 호출자 트랜잭션이 아니라 별도 세션에서 커밋한다.
+
+    사용량 집계의 근거라 작업이 실패해도 남아야 한다. 같은 트랜잭션에 넣으면 전사 중에
+    녹음이 삭제될 때 롤백으로 이력까지 날아가고, 그러면 전사 시간 한도를 우회할 수 있다.
+    """
     meta = meta or {}
-    session.add(
-        JobLog(
-            # 워크스페이스를 직접 문다 — 녹음이 지워져도 사용 이력은 남아야 한다
-            workspace_id=recording.workspace_id,
-            recording_id=recording.id,
-            stage=stage,
-            status=status,
-            started_at=started,
-            finished_at=datetime.now(UTC),
-            audio_sec=recording.duration_sec,
-            elapsed_sec=meta.get("elapsed_sec"),
-            device=meta.get("device"),
-            model=meta.get("model"),
-            error=error,
-        )
+    row = dict(
+        # 녹음이 삭제돼도 집계에 남도록 workspace_id를 따로 저장한다
+        workspace_id=recording.workspace_id,
+        recording_id=recording.id,
+        stage=stage,
+        status=status,
+        started_at=started,
+        finished_at=datetime.now(UTC),
+        audio_sec=recording.duration_sec,
+        elapsed_sec=meta.get("elapsed_sec"),
+        device=meta.get("device"),
+        model=meta.get("model"),
+        error=error,
     )
+    with Session(bind=session.get_bind()) as ledger:
+        try:
+            ledger.add(JobLog(**row))
+            ledger.commit()
+        except IntegrityError:
+            # 전사 중에 녹음이 삭제된 경우. FK 위반이므로 recording_id 없이 다시 저장한다
+            ledger.rollback()
+            ledger.add(JobLog(**{**row, "recording_id": None}))
+            ledger.commit()
 
 
 def transcribe_stage(
