@@ -28,6 +28,9 @@ _hasher = PasswordHasher()
 _DUMMY_HASH = _hasher.hash("존재하지 않는 계정을 위한 자리")
 
 TOKEN_BYTES = 32
+# 계정 비밀번호 최소 길이. 시도 제한이 argon2 앞에 있어도 네 자리 암구호는 IP를 바꿔
+# 가며 두드리면 분 단위로 뚫린다. 공유 링크 비밀번호와 달리 이쪽은 계정 전체가 걸린다
+PASSWORD_MIN = 8
 SESSION_IDLE_DAYS = 14
 SESSION_ABSOLUTE_DAYS = 90
 # 읽기 경로에서 매번 쓰지 않기 위한 간격. 세션 갱신은 사용자가 못 느낄 정도면 충분하다

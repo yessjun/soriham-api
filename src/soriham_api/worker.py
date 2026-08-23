@@ -351,6 +351,12 @@ def transcribe_stage(
             )
         recording.language = result.get("language")
         recording.stt_meta = result.get("meta") or {}
+        # 컨테이너가 적어 둔 길이는 믿을 수 없다. ffprobe는 mp4의 mvhd나 mp3의 Xing
+        # 헤더를 디코딩 없이 그대로 읽으므로, 그 숫자만 1초로 고친 3시간짜리 파일이
+        # 한도를 통과하고 원장에도 1초로 남는다. 전사가 실제로 닿은 끝을 기준으로 삼는다
+        measured = max((seg["end"] for seg in result["segments"]), default=0.0)
+        if measured > (recording.duration_sec or 0.0):
+            recording.duration_sec = measured
     except RunnerUnavailable as exc:
         # 러너에 못 닿은 것이지 이 파일의 문제가 아니다. error로 굳히면 러너가 죽어 있는
         # 동안 대기열 전체가 error가 되고, 되돌릴 길은 사람 손뿐이다

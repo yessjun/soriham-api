@@ -249,9 +249,11 @@ def _read_password() -> str:
     """비밀번호는 인자로 받지 않는다 — 셸 기록과 프로세스 목록에 남는다."""
     import getpass
 
+    from soriham_api.auth import PASSWORD_MIN
+
     first = getpass.getpass("비밀번호: ")
-    if not first:
-        raise SystemExit("비밀번호가 비어 있습니다")
+    if len(first) < PASSWORD_MIN:
+        raise SystemExit(f"비밀번호는 {PASSWORD_MIN}자 이상이어야 합니다")
     if first != getpass.getpass("다시 한 번: "):
         raise SystemExit("두 번 입력이 다릅니다")
     return first

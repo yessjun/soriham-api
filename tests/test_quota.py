@@ -321,7 +321,11 @@ def test_가입으로_생긴_워크스페이스에_기본_한도가_걸린다(en
 
     client.post(
         "/api/auth/signup",
-        json={"email": "new@example.com", "password": "암구호", "display_name": "새사람"},
+        json={
+            "email": "new@example.com",
+            "password": "가입용 시험 암구호",
+            "display_name": "새사람",
+        },
     )
 
     workspace = db.scalar(select(Workspace).where(Workspace.slug == "new"))
@@ -338,7 +342,11 @@ def test_기본_한도를_무제한으로_두면_걸리지_않는다(engine, db)
 
     TestClient(app).post(
         "/api/auth/signup",
-        json={"email": "free@example.com", "password": "암구호", "display_name": "자유"},
+        json={
+            "email": "free@example.com",
+            "password": "가입용 시험 암구호",
+            "display_name": "자유",
+        },
     )
 
     workspace = db.scalar(select(Workspace).where(Workspace.slug == "free"))
@@ -457,3 +465,31 @@ def test_길이를_못_읽은_파일은_한도가_아니라_error로_세운다(d
     recording = db.scalar(select(Recording))
     assert recording.status == "error"
     assert "길이" in recording.error
+
+
+def test_컨테이너가_적어둔_길이가_거짓이면_실측으로_청구한다(db, workspace, tmp_path):
+    """ffprobe는 mp4의 mvhd를 디코딩 없이 읽는다. 그 숫자만 1초로 고친 3시간짜리
+    파일이 한도를 통과하고 원장에도 1초로 남으면 무제한 무료 전사가 된다."""
+    from test_worker import FakeRunnerClient as WorkerRunner
+
+    workspace.quota_minutes = 600
+    db.commit()
+    recording = make_recording(db, workspace, duration=1.0)
+    runner = WorkerRunner(
+        result={
+            "segments": [
+                {"start": 0.0, "end": 5400.0, "text": "한참 말한다", "speaker": "SPEAKER_00"}
+            ],
+            "language": "ko",
+            "meta": {},
+        }
+    )
+
+    assert process_one(db, runner) is True
+
+    db.refresh(recording)
+    assert recording.duration_sec == 5400.0
+    billed = db.scalar(
+        select(JobLog.audio_sec).where(JobLog.stage == "transcribe", JobLog.status == "done")
+    )
+    assert billed == 5400.0
