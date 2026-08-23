@@ -36,6 +36,7 @@ uv run soriham-api serve    # REST API (기본 8200 포트)
 | `GET /api/workspaces/{ws}/recordings` | 목록 (q, status, tag 필터, 페이지네이션) |
 | `GET /api/recordings/{id}` | 상세 (세그먼트, 화자 이름, 태그) |
 | `PATCH /api/recordings/{id}` | 제목 수정 |
+| `DELETE /api/recordings/{id}` | 삭제 (업로드본은 원본 파일까지, 스캔본은 등록만) |
 | `PUT /api/recordings/{id}/speakers/{key}` | 화자 표시 이름 수정 |
 | `GET /api/recordings/{id}/audio` | 오디오 스트리밍 (Range 지원) |
 | `POST·DELETE /api/recordings/{id}/tags…` | 태그 추가·제거 |

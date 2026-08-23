@@ -71,6 +71,7 @@ def recording_routes(rec: Recording) -> list[tuple[str, str, dict]]:
             f"/api/recordings/{pid}/tags/00000000-0000-0000-0000-000000000001",
             {},
         ),
+        ("DELETE", f"/api/recordings/{pid}", {}),
     ]
 
 

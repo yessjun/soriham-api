@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from soriham_api.ingest import scan
 from soriham_api.models import JobLog, Recording, Segment
@@ -251,3 +251,23 @@ def test_소음_세그먼트는_요약에_들어가지_않는다(db, tmp_path: P
     db.refresh(recording)
     assert [s.kind for s in recording.segments] == ["speech", "noise"]
     assert captured == ["실제 발언"]
+
+
+def test_처리_중에_녹음이_사라져도_워커가_멎지_않는다(db, tmp_path: Path, workspace):
+    """삭제 기능이 생기면서 실제로 도달 가능해진 자리다.
+
+    결과는 버려지되 워커는 다음 레코드로 넘어가야 한다. 실패가 격리를 뚫고 나가면
+    루프가 잠들었다 깨는 동안 큐 전체가 멈춘다.
+    """
+    [recording] = register(db, tmp_path, ["20260818_210000.wav"], workspace)
+
+    class VanishingRunner(FakeRunnerClient):
+        def transcribe(self, audio_path, **kwargs):
+            # 러너가 도는 사이 다른 세션이 녹음을 지운 상황
+            db.execute(delete(Recording).where(Recording.id == recording.id))
+            db.commit()
+            return super().transcribe(audio_path, **kwargs)
+
+    # 예외가 밖으로 새면 여기서 터진다
+    assert process_one(db, VanishingRunner()) is True
+    assert db.scalar(select(Recording).where(Recording.id == recording.id)) is None

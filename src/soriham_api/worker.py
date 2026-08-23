@@ -233,16 +233,21 @@ def process_one(
     recording = claim_next(session)
     if recording is None:
         return False
-    logger.info("처리 시작: %s (%s)", recording.filename, recording.status)
+    # 로그에 쓸 이름을 미리 붙잡고 롤백을 로깅보다 먼저 한다. 처리 중에 녹음이
+    # 지워지면 세션이 롤백 대기 상태가 되는데, 그때 아직 적재되지 않은 속성을 읽으면
+    # 예외가 격리를 뚫고 나간다. 지금 배치에서는 속성이 이미 적재돼 있어 닿지 않지만,
+    # 그 사정에 기대고 싶지 않은 자리다
+    name = recording.filename
+    logger.info("처리 시작: %s (%s)", name, recording.status)
     try:
         if recording.status != "enriching":
             transcribe_stage(session, recording, runner, model=model, language=language)
         enrich_stage(session, recording, enricher)
-        logger.info("처리 완료: %s", recording.filename)
+        logger.info("처리 완료: %s", name)
     except Exception:
         # 에러는 레코드에 격리 기록됐고, 워커는 다음 레코드로 계속
-        logger.exception("처리 실패: %s", recording.filename)
         session.rollback()
+        logger.exception("처리 실패: %s", name)
     return True
 
 
