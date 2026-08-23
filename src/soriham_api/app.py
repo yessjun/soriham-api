@@ -31,19 +31,18 @@ from soriham_api.api_schemas import (
 )
 from soriham_api.config import Settings, load_settings
 from soriham_api.db import make_session_factory
+from soriham_api.deps import CSRF_HEADER, WorkspaceContext, build_deps
 from soriham_api.ingest import (
     AUDIO_EXTENSIONS,
     find_duplicate,
     ingest_file,
     partial_hash,
 )
-from soriham_api.models import JobLog, Recording, SpeakerName, Tag, Workspace
+from soriham_api.models import JobLog, Recording, SpeakerName, Tag, User
+from soriham_api.permissions import Perm, Principal, resolve_recording_perm
+from soriham_api.routes_auth import register as register_auth_routes
 from soriham_api.storage import workspace_upload_dir
-from soriham_api.tenancy import (
-    WorkspaceNotFound,
-    get_workspace,
-    resolve_tag,
-)
+from soriham_api.tenancy import resolve_tag
 from soriham_api.uploads import (
     UploadEmpty,
     UploadTooLarge,
@@ -69,14 +68,25 @@ def create_app(
     cfg = settings or load_settings()
     factory = session_factory or make_session_factory(cfg)
 
-    app = FastAPI(title="soriham-api", version=soriham_api.__version__)
+    app = FastAPI(
+        title="soriham-api",
+        version=soriham_api.__version__,
+        # 운영에서는 스키마를 열어 두지 않는다. 라우트 목록 자체가 정찰 재료다
+        docs_url="/docs" if cfg.expose_docs else None,
+        redoc_url="/redoc" if cfg.expose_docs else None,
+        openapi_url="/openapi.json" if cfg.expose_docs else None,
+    )
     # 브라우저 경유 접근을 설정된 콘솔 오리진으로 한정 (사설망이라도 * 개방은
-    # 임의 웹페이지의 녹취록 열람을 허용하게 됨)
+    # 임의 웹페이지의 녹취록 열람을 허용하게 됨). 쿠키를 실어 보내므로
+    # 자격증명 허용이 필요하고, 그래서 오리진에 *를 쓸 수 없다 — 설정이 막는다
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cfg.cors_origins),
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["content-type", CSRF_HEADER],
+        # 플레이어가 Range 응답을 읽으려면 이 둘이 보여야 한다
+        expose_headers=["content-range", "accept-ranges"],
     )
 
     if cfg.upload_dir is not None:
@@ -85,35 +95,16 @@ def create_app(
     # 해시 판정부터 커밋까지를 직렬화한다 — 동시 업로드가 같은 경로·같은 내용을
     # 서로 못 보고 지나가면 파일이 덮이거나 중복 거절이 새어 나간다
     upload_lock = threading.Lock()
+    deps = build_deps(cfg, factory, upload_lock)
+    db = deps.db
+    # 권한 등급마다 한 번씩만 만든다. 경로 파라미터로 녹음을 얻는 길은 이 둘뿐이다
+    viewable = deps.recording_at(Perm.VIEW)
+    editable = deps.recording_at(Perm.EDIT)
+    register_auth_routes(app, deps)
 
-    def db() -> Iterator[Session]:
-        with factory() as session:
-            yield session
-
-    def _upload_workspace(session: Session) -> Workspace:
-        """업로드본이 들어갈 워크스페이스.
-
-        지금은 설정이 정한 한 곳이다. 인증이 붙으면 요청한 사람의 워크스페이스로 바뀐다.
-        """
-        if not cfg.default_workspace:
-            raise HTTPException(503, "업로드 대상 워크스페이스가 설정돼 있지 않습니다")
-        try:
-            return get_workspace(session, cfg.default_workspace)
-        except WorkspaceNotFound as exc:
-            raise HTTPException(503, str(exc)) from None
-
-    def get_recording(session: Session, public_id: uuid.UUID) -> Recording:
-        recording = session.scalar(
-            select(Recording)
-            .where(Recording.public_id == public_id)
-            .options(selectinload(Recording.tags))
-        )
-        if recording is None:
-            raise HTTPException(404, "녹음이 없습니다")
-        return recording
-
-    @app.get("/api/recordings", response_model=RecordingList)
+    @app.get("/api/workspaces/{workspace_id}/recordings", response_model=RecordingList)
     def list_recordings(
+        ctx: WorkspaceContext = Depends(deps.workspace_ctx),
         session: Session = Depends(db),
         q: str | None = None,
         status: str | None = None,
@@ -121,11 +112,14 @@ def create_app(
         limit: int = Query(50, le=200),
         offset: int = 0,
     ) -> RecordingList:
+        ws = ctx.workspace.id
         stmt = select(Recording).options(selectinload(Recording.tags))
-        stmt = _apply_filters(stmt, q=q, status=status, tag=tag)
+        stmt = _apply_filters(stmt, q=q, status=status, tag=tag, workspace_id=ws)
         total = session.scalar(
             select(func.count()).select_from(
-                _apply_filters(select(Recording), q=q, status=status, tag=tag).subquery()
+                _apply_filters(
+                    select(Recording), q=q, status=status, tag=tag, workspace_id=ws
+                ).subquery()
             )
         )
         rows = session.scalars(
@@ -135,12 +129,24 @@ def create_app(
         ).all()
         return RecordingList(items=[_summary(r) for r in rows], total=total or 0)
 
-    @app.post("/api/recordings", response_model=RecordingSummary, status_code=201)
-    def upload_recording(file: UploadFile, session: Session = Depends(db)) -> RecordingSummary:
+    @app.post(
+        "/api/workspaces/{workspace_id}/recordings",
+        response_model=RecordingSummary,
+        status_code=201,
+    )
+    def upload_recording(
+        file: UploadFile,
+        ctx: WorkspaceContext = Depends(deps.workspace_ctx),
+        session: Session = Depends(db),
+        user: User = Depends(deps.require_active),
+        _: None = Depends(deps.require_csrf),
+    ) -> RecordingSummary:
         """콘솔에서 올린 오디오를 보관 폴더에 저장하고 큐에 등록한다."""
         if cfg.upload_dir is None:
             raise HTTPException(503, "업로드가 설정돼 있지 않습니다 (UPLOAD_DIR)")
-        workspace = _upload_workspace(session)
+        if ctx.perm < Perm.MANAGE:
+            raise HTTPException(403, "이 워크스페이스에 올릴 권한이 없습니다")
+        workspace = ctx.workspace
         name = safe_filename(file.filename)
         if name is None:
             raise HTTPException(422, "파일 이름이 없습니다")
@@ -197,20 +203,15 @@ def create_app(
         return _summary(recording)
 
     @app.get("/api/recordings/{public_id}", response_model=RecordingDetail)
-    def recording_detail(public_id: uuid.UUID, session: Session = Depends(db)) -> RecordingDetail:
-        recording = session.scalar(
-            select(Recording)
-            .where(Recording.public_id == public_id)
-            .options(
-                selectinload(Recording.tags),
-                selectinload(Recording.segments),
-                selectinload(Recording.speaker_names),
-            )
-        )
-        if recording is None:
-            raise HTTPException(404, "녹음이 없습니다")
+    def recording_detail(
+        recording: Recording = Depends(viewable),
+        principal: Principal = Depends(deps.principal),
+        session: Session = Depends(db),
+    ) -> RecordingDetail:
+        can_edit = resolve_recording_perm(session, principal, recording) >= Perm.EDIT
         return RecordingDetail(
             **_summary(recording).model_dump(),
+            can_edit=can_edit,
             error=recording.error,
             stt_meta=recording.stt_meta,
             speaker_names={n.speaker_key: n.display_name for n in recording.speaker_names},
@@ -229,21 +230,23 @@ def create_app(
 
     @app.patch("/api/recordings/{public_id}", response_model=RecordingSummary)
     def update_title(
-        public_id: uuid.UUID, body: TitleIn, session: Session = Depends(db)
+        body: TitleIn,
+        recording: Recording = Depends(editable),
+        session: Session = Depends(db),
+        _: None = Depends(deps.require_csrf),
     ) -> RecordingSummary:
-        recording = get_recording(session, public_id)
         recording.title = body.title.strip() or None
         session.commit()
         return _summary(recording)
 
     @app.put("/api/recordings/{public_id}/speakers/{speaker_key}")
     def rename_speaker(
-        public_id: uuid.UUID,
         speaker_key: str,
         body: SpeakerNameIn,
+        recording: Recording = Depends(editable),
         session: Session = Depends(db),
+        _: None = Depends(deps.require_csrf),
     ) -> dict[str, str]:
-        recording = get_recording(session, public_id)
         row = session.scalar(
             select(SpeakerName).where(
                 SpeakerName.recording_id == recording.id,
@@ -264,17 +267,21 @@ def create_app(
 
     @app.get("/api/recordings/{public_id}/audio")
     def stream_audio(
-        public_id: uuid.UUID, request: Request, session: Session = Depends(db)
+        request: Request,
+        recording: Recording = Depends(viewable),
     ) -> Response:
-        recording = get_recording(session, public_id)
         path = Path(recording.path)
         if not path.is_file():
             raise HTTPException(404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)")
         return _range_response(path, request.headers.get("range"))
 
     @app.post("/api/recordings/{public_id}/tags", response_model=list[TagOut])
-    def add_tag(public_id: uuid.UUID, body: TagIn, session: Session = Depends(db)) -> list[TagOut]:
-        recording = get_recording(session, public_id)
+    def add_tag(
+        body: TagIn,
+        recording: Recording = Depends(editable),
+        session: Session = Depends(db),
+        _: None = Depends(deps.require_csrf),
+    ) -> list[TagOut]:
         name = body.name.strip()
         if not name:
             raise HTTPException(422, "태그 이름이 비어 있습니다")
@@ -286,24 +293,32 @@ def create_app(
 
     @app.delete("/api/recordings/{public_id}/tags/{tag_public_id}")
     def remove_tag(
-        public_id: uuid.UUID, tag_public_id: uuid.UUID, session: Session = Depends(db)
+        tag_public_id: uuid.UUID,
+        recording: Recording = Depends(editable),
+        session: Session = Depends(db),
+        _: None = Depends(deps.require_csrf),
     ) -> list[TagOut]:
-        recording = get_recording(session, public_id)
         recording.tags = [t for t in recording.tags if t.public_id != tag_public_id]
         session.commit()
         return [TagOut(id=t.public_id, name=t.name) for t in recording.tags]
 
-    @app.get("/api/tags", response_model=list[TagOut])
-    def list_tags(session: Session = Depends(db)) -> list[TagOut]:
+    @app.get("/api/workspaces/{workspace_id}/tags", response_model=list[TagOut])
+    def list_tags(
+        ctx: WorkspaceContext = Depends(deps.workspace_ctx),
+        session: Session = Depends(db),
+    ) -> list[TagOut]:
         return [
             TagOut(id=t.public_id, name=t.name)
-            for t in session.scalars(select(Tag).order_by(Tag.name))
+            for t in session.scalars(
+                select(Tag).where(Tag.workspace_id == ctx.workspace.id).order_by(Tag.name)
+            )
         ]
 
-    @app.get("/api/search", response_model=SearchResult)
+    @app.get("/api/workspaces/{workspace_id}/search", response_model=SearchResult)
     def search(
         q: str = Query(min_length=1),
         limit: int = Query(50, le=200),
+        ctx: WorkspaceContext = Depends(deps.workspace_ctx),
         session: Session = Depends(db),
     ) -> SearchResult:
         from soriham_api.models import Segment
@@ -316,11 +331,12 @@ def create_app(
             select(Recording)
             .options(selectinload(Recording.tags))
             .where(
+                Recording.workspace_id == ctx.workspace.id,
                 or_(
                     Recording.filename.ilike(pattern),
                     Recording.title.ilike(pattern),
                     Recording.summary.ilike(pattern),
-                )
+                ),
             )
             .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
             .limit(limit)
@@ -331,7 +347,7 @@ def create_app(
         seg_rows = session.execute(
             select(Segment, Recording)
             .join(Recording, Segment.recording_id == Recording.id)
-            .where(Segment.text.ilike(pattern))
+            .where(Recording.workspace_id == ctx.workspace.id, Segment.text.ilike(pattern))
             .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc(), Segment.idx)
             .limit(limit)
         ).all()
@@ -351,14 +367,24 @@ def create_app(
             )
         return SearchResult(hits=hits[:limit])
 
-    @app.get("/api/stats", response_model=Stats)
-    def stats(session: Session = Depends(db)) -> Stats:
+    @app.get("/api/workspaces/{workspace_id}/stats", response_model=Stats)
+    def stats(
+        ctx: WorkspaceContext = Depends(deps.workspace_ctx),
+        session: Session = Depends(db),
+    ) -> Stats:
+        if ctx.perm < Perm.ADMIN:
+            # 처리 파이프라인 뷰다. 최근 에러가 녹음 제목을 나열하므로 구성원 전체에게
+            # 열면 받지 않은 녹음의 제목이 보인다
+            raise HTTPException(403, "이 화면은 워크스페이스 관리자만 볼 수 있습니다")
+        ws = ctx.workspace.id
         rows = session.execute(
             select(
                 Recording.status,
                 func.count(),
                 func.coalesce(func.sum(Recording.duration_sec), 0.0),
-            ).group_by(Recording.status)
+            )
+            .where(Recording.workspace_id == ws)
+            .group_by(Recording.status)
         ).all()
         by_status = [StatusCount(status=s, count=c, audio_sec=float(a)) for s, c, a in rows]
         total_audio = sum(x.audio_sec for x in by_status if x.status != "duplicate")
@@ -368,6 +394,7 @@ def create_app(
         recent = session.execute(
             select(JobLog.audio_sec, JobLog.elapsed_sec)
             .where(
+                JobLog.workspace_id == ws,
                 JobLog.stage == "transcribe",
                 JobLog.status == "done",
                 JobLog.audio_sec.is_not(None),
@@ -390,7 +417,7 @@ def create_app(
         recent_errors = session.scalars(
             select(Recording)
             .options(selectinload(Recording.tags))
-            .where(Recording.status == "error")
+            .where(Recording.workspace_id == ws, Recording.status == "error")
             .order_by(Recording.updated_at.desc())
             .limit(10)
         ).all()
@@ -406,10 +433,16 @@ def create_app(
 
 
 def _apply_filters(
-    stmt: Select, *, q: str | None, status: str | None, tag: uuid.UUID | None
+    stmt: Select,
+    *,
+    q: str | None,
+    status: str | None,
+    tag: uuid.UUID | None,
+    workspace_id: int,
 ) -> Select:
     from soriham_api.models import RecordingTag, Segment
 
+    stmt = stmt.where(Recording.workspace_id == workspace_id)
     if status:
         stmt = stmt.where(Recording.status == status)
     if tag:

@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
+from conftest import login, make_settings
 from soriham_api.app import create_app
-from soriham_api.config import Settings
 from soriham_api.ingest import scan
 from soriham_api.models import JobLog, Recording
 from soriham_api.worker import process_one
@@ -17,24 +17,21 @@ from test_worker import RESULT, FakeRunnerClient
 
 
 @pytest.fixture
-def client(engine, db, tmp_path: Path):
-    settings = Settings(
-        database_url="unused",
-        audio_dirs=(),
-        runner_url="http://runner.test",
-        runner_upload=False,
-        stt_model=None,
-        stt_language=None,
-        cors_origins=("http://localhost:5174",),
-        upload_dir=None,
-        max_upload_bytes=4 * 1024 * 1024 * 1024,
-        default_workspace=None,
-        enrich_backend="off",
-        ollama_url="http://localhost:11434",
-        ollama_model="qwen3:8b",
-    )
-    app = create_app(settings=settings, session_factory=sessionmaker(bind=engine))
+def client(engine, db, owner):
+    app = create_app(settings=make_settings(), session_factory=sessionmaker(bind=engine))
+    c = TestClient(app)
+    login(c, owner.email)
+    return c
+
+
+@pytest.fixture
+def anon_client(engine, db):
+    app = create_app(settings=make_settings(), session_factory=sessionmaker(bind=engine))
     return TestClient(app)
+
+
+def ws_path(workspace, suffix: str) -> str:
+    return f"/api/workspaces/{workspace.public_id}/{suffix}"
 
 
 def make_recording(db, tmp_path: Path, workspace, name: str = "20260817_100000.wav") -> Recording:
@@ -49,7 +46,7 @@ def make_recording(db, tmp_path: Path, workspace, name: str = "20260817_100000.w
 def test_list_and_detail(client, db, tmp_path: Path, workspace):
     rec = make_recording(db, tmp_path, workspace)
 
-    body = client.get("/api/recordings").json()
+    body = client.get(ws_path(workspace, "recordings")).json()
     assert body["total"] == 1
     item = body["items"][0]
     assert item["id"] == str(rec.public_id)
@@ -91,40 +88,40 @@ def test_tags_attach_and_filter(client, db, tmp_path: Path, workspace):
 
     # 같은 이름은 재사용되고 다른 녹음에도 붙는다
     client.post(f"/api/recordings/{other.public_id}/tags", json={"name": "주간회의"})
-    assert len(client.get("/api/tags").json()) == 1
+    assert len(client.get(ws_path(workspace, "tags")).json()) == 1
 
-    filtered = client.get("/api/recordings", params={"tag": tag_id}).json()
+    filtered = client.get(ws_path(workspace, "recordings"), params={"tag": tag_id}).json()
     assert filtered["total"] == 2
 
     client.delete(f"/api/recordings/{rec.public_id}/tags/{tag_id}")
-    filtered = client.get("/api/recordings", params={"tag": tag_id}).json()
+    filtered = client.get(ws_path(workspace, "recordings"), params={"tag": tag_id}).json()
     assert filtered["total"] == 1
 
 
 def test_search_returns_segment_hits(client, db, tmp_path: Path, workspace):
     rec = make_recording(db, tmp_path, workspace)
 
-    hits = client.get("/api/search", params={"q": "안녕"}).json()["hits"]
+    hits = client.get(ws_path(workspace, "search"), params={"q": "안녕"}).json()["hits"]
     assert len(hits) == 1
     assert hits[0]["recording"]["id"] == str(rec.public_id)
     assert hits[0]["segment"]["text"] == "안녕하세요"
     assert hits[0]["segment"]["start_sec"] == 0.0
 
     # 파일명 매칭은 segment 없이 반환
-    hits = client.get("/api/search", params={"q": "20260817"}).json()["hits"]
+    hits = client.get(ws_path(workspace, "search"), params={"q": "20260817"}).json()["hits"]
     assert hits[0]["segment"] is None
 
-    assert client.get("/api/search", params={"q": "없는말"}).json()["hits"] == []
+    assert client.get(ws_path(workspace, "search"), params={"q": "없는말"}).json()["hits"] == []
 
 
 def test_list_q_filter_matches_segment_text(client, db, tmp_path: Path, workspace):
     make_recording(db, tmp_path, workspace)
     make_recording(db, tmp_path, workspace, "20260101_000000.wav")
 
-    body = client.get("/api/recordings", params={"q": "반갑"}).json()
+    body = client.get(ws_path(workspace, "recordings"), params={"q": "반갑"}).json()
     assert body["total"] == 2  # 두 녹음 모두 같은 가짜 전사 결과
 
-    body = client.get("/api/recordings", params={"q": "20260101"}).json()
+    body = client.get(ws_path(workspace, "recordings"), params={"q": "20260101"}).json()
     assert body["total"] == 1
 
 
@@ -167,7 +164,7 @@ def test_stats(client, db, tmp_path: Path, workspace):
     rec2.error = "stt: 러너 다운"
     db.commit()
 
-    body = client.get("/api/stats").json()
+    body = client.get(ws_path(workspace, "stats")).json()
     statuses = {x["status"]: x["count"] for x in body["by_status"]}
     assert statuses == {"done": 1, "error": 1}
     assert body["speed_ratio"] is not None

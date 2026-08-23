@@ -20,7 +20,11 @@ class Settings:
     - UPLOAD_DIR: 콘솔 업로드본을 저장할 폴더 (비우면 업로드 기능 비활성).
       **AUDIO_DIRS와 겹치면 기동을 거부한다** — 겹치면 남의 업로드가 스캔에 집혀
       엉뚱한 워크스페이스로 흘러든다
-    - DEFAULT_WORKSPACE: 스캔·감시·업로드가 녹음을 넣을 워크스페이스 슬러그
+    - DEFAULT_WORKSPACE: 스캔·감시가 녹음을 넣을 워크스페이스 슬러그
+    - COOKIE_SECURE: 세션 쿠키에 Secure를 붙일지 (기본 켬, 로컬 http 개발만 끈다)
+    - COOKIE_NAME / COOKIE_DOMAIN: 세션 쿠키 이름과 도메인 (도메인을 비우면 host-only)
+    - AUTO_APPROVE: 가입을 승인 없이 바로 활성으로 (기본 끔 — 승인제)
+    - EXPOSE_DOCS: /docs, /openapi.json 노출 여부 (기본 끔)
     - MAX_UPLOAD_MB: 업로드 한 건의 크기 상한 (기본 4096)
     - ENRICH_BACKEND: 제목/요약/태그 생성 백엔드 (ollama | claude | off)
     - OLLAMA_URL / OLLAMA_MODEL: ollama 백엔드 설정
@@ -35,6 +39,11 @@ class Settings:
     cors_origins: tuple[str, ...]
     upload_dir: Path | None
     default_workspace: str | None
+    cookie_name: str
+    cookie_secure: bool
+    cookie_domain: str | None
+    auto_approve: bool
+    expose_docs: bool
     max_upload_bytes: int
     enrich_backend: str
     ollama_url: str
@@ -50,6 +59,12 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     dirs = tuple(Path(p).expanduser() for p in (e.get("AUDIO_DIRS") or "").split(os.pathsep) if p)
     upload_dir = Path(e["UPLOAD_DIR"]).expanduser() if e.get("UPLOAD_DIR") else None
     _reject_overlap(dirs, upload_dir)
+    origins = tuple(
+        o.strip()
+        for o in (e.get("CORS_ORIGINS") or "http://localhost:5174").split(",")
+        if o.strip()
+    )
+    _reject_wildcard_origin(origins)
     return Settings(
         database_url=url,
         audio_dirs=dirs,
@@ -57,18 +72,38 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
         runner_upload=(e.get("RUNNER_UPLOAD") or "").lower() in ("1", "true", "yes"),
         stt_model=e.get("STT_MODEL") or None,
         stt_language=e.get("STT_LANGUAGE") or None,
-        cors_origins=tuple(
-            o.strip()
-            for o in (e.get("CORS_ORIGINS") or "http://localhost:5174").split(",")
-            if o.strip()
-        ),
+        cors_origins=origins,
         upload_dir=upload_dir,
         default_workspace=e.get("DEFAULT_WORKSPACE") or None,
+        cookie_name=e.get("COOKIE_NAME") or "soriham_session",
+        cookie_secure=_flag(e, "COOKIE_SECURE", default=True),
+        cookie_domain=e.get("COOKIE_DOMAIN") or None,
+        auto_approve=_flag(e, "AUTO_APPROVE", default=False),
+        expose_docs=_flag(e, "EXPOSE_DOCS", default=False),
         max_upload_bytes=int(e.get("MAX_UPLOAD_MB") or 4096) * 1024 * 1024,
         enrich_backend=e.get("ENRICH_BACKEND") or "ollama",
         ollama_url=e.get("OLLAMA_URL") or "http://localhost:11434",
         ollama_model=e.get("OLLAMA_MODEL") or "qwen3:8b",
     )
+
+
+def _flag(e: dict[str, str], key: str, *, default: bool) -> bool:
+    raw = e.get(key)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _reject_wildcard_origin(origins: tuple[str, ...]) -> None:
+    """자격 증명을 실어 보내는 설정에서 * 오리진은 기동을 막는다.
+
+    Starlette은 이 조합에서 조용히 자격 증명을 빼고 동작한다. 조용히 degrade 하는
+    것이 가장 나쁜 실패 모드다.
+    """
+    if "*" in origins:
+        raise RuntimeError(
+            "CORS_ORIGINS에 *를 쓸 수 없습니다. 쿠키 인증에는 오리진을 명시해야 합니다"
+        )
 
 
 def _reject_overlap(audio_dirs: tuple[Path, ...], upload_dir: Path | None) -> None:

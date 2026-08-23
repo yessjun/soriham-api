@@ -45,6 +45,8 @@ class SegmentOut(BaseModel):
 
 
 class RecordingDetail(RecordingSummary):
+    # 화면이 편집 어포던스를 그릴지. 콘솔이 역할 산술을 다시 하면 두 규칙이 어긋난다
+    can_edit: bool = False
     error: str | None
     stt_meta: dict[str, Any] | None
     speaker_names: dict[str, str]
@@ -85,3 +87,66 @@ class Stats(BaseModel):
     speed_ratio: float | None
     eta_sec: float | None
     recent_errors: list[RecordingSummary]
+
+
+class UserOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: str
+
+
+class WorkspaceRef(BaseModel):
+    id: uuid.UUID
+    name: str
+    slug: str
+    role: str
+
+
+class MeOut(BaseModel):
+    user: UserOut
+    status: str
+    workspaces: list[WorkspaceRef]
+    default_workspace_id: uuid.UUID | None
+    # 화면이 무엇을 그릴지 정하는 값. 콘솔이 역할 산술을 다시 하지 않게 서버가 준다
+    capabilities: list[str]
+    pending_user_count: int | None = None
+
+
+class SignupIn(BaseModel):
+    email: str
+    password: str
+    display_name: str
+    signup_note: str | None = None
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class PendingUserOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: str
+    signup_note: str | None
+    requested_at: datetime
+
+
+class MemberOut(BaseModel):
+    user: UserOut
+    role: str
+    joined_at: datetime
+
+
+class WorkspaceCreateIn(BaseModel):
+    name: str
+    slug: str
+
+
+class RoleIn(BaseModel):
+    role: str
