@@ -16,7 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from soriham_api.ingest import resume_status
-from soriham_api.models import JobLog, Recording, Segment
+from soriham_api.models import JobLog, Recording, Segment, Workspace
 from soriham_api.quota import allows_transcription
 from soriham_api.stt_client import RunnerClient
 
@@ -94,24 +94,76 @@ def release_quota_blocked(session: Session) -> int:
 
 
 def claim_next(session: Session) -> Recording | None:
-    """우선순위(최신 녹음 먼저)로 다음 대기 레코드를 집는다. 다중 워커 안전."""
-    recording = session.scalars(
-        select(Recording)
-        .where(Recording.status.in_(CLAIMABLE))
-        .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    ).first()
-    if recording is None:
-        # 세그먼트는 있는데 엔리치먼트가 안 끝난 레코드(enriching 재개분)
+    """다음 일감 하나. 워크스페이스를 돌아가며 고르고, 그 안에서는 최신 녹음이 먼저다.
+
+    전역 최신순으로 집으면 한 사람이 백로그 1만 시간을 올리는 순간 나머지 전부가 그
+    뒤에 선다. GPU가 하나라 여기가 유일한 직렬화 지점이므로, 공정성을 넣을 자리도
+    여기뿐이다.
+
+    **잠금 순서는 항상 workspaces → recordings.** 뒤집으면 데드락이고, 그건 부하가
+    걸려야 드러난다.
+    """
+    eligible = _workspaces_with_work(session)
+    if not eligible:
+        return None
+    if len(eligible) == 1:
+        # 워크스페이스가 하나뿐이면 나눌 것이 없다. 그런데도 워크스페이스 행을 잠그면
+        # 워커 둘이 그 행에서 직렬화돼, 수천 건이 대기 중인데 한쪽이 5초씩 잔다.
+        # 소유자 혼자 백로그를 도는 현실 워크로드가 정확히 이 모양이다
+        return _claim_in_workspace(session, eligible[0])
+
+    # 이 호출이 찍는 도장은 전부 같은 시각이다. 반복마다 시계를 읽을 이유가 없다
+    now = datetime.now(UTC)
+    for _ in range(len(eligible)):
+        workspace = session.scalars(
+            select(Workspace)
+            .where(Workspace.id.in_(eligible))
+            # 한 번도 안 잡힌 곳이 맨 앞이다. 새로 승인된 사람의 첫 녹음이 바로 돈다.
+            # READ COMMITTED에서는 이 정렬이 재평가되지 않아 가장 오래된 곳을 놓칠 수
+            # 있다 — 공정성이 흔들릴 뿐 잘못된 결과는 아니다
+            .order_by(Workspace.last_claimed_at.asc().nulls_first(), Workspace.id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        ).first()
+        if workspace is None:
+            # 남은 워크스페이스를 전부 다른 워커가 쥐고 있다
+            return None
+        # **빈손이어도 도장을 찍는다.** 이것이 진행을 보장하는 유일한 장치다. 안 찍으면
+        # 그 워크스페이스가 매번 다시 1순위라, 다른 곳에 일감이 있는데도 큐가 멈춘다
+        workspace.last_claimed_at = now
+        recording = _claim_in_workspace(session, workspace.id)
+        if recording is not None:
+            return recording
+    return None
+
+
+def _workspaces_with_work(session: Session) -> list[int]:
+    """일감이 남은 워크스페이스. 잠그지 않고 후보만 추린다."""
+    return list(
+        session.scalars(
+            select(Recording.workspace_id)
+            .where(Recording.status.in_((*CLAIMABLE, "enriching")))
+            .distinct()
+        ).all()
+    )
+
+
+def _claim_in_workspace(session: Session, workspace_id: int) -> Recording | None:
+    """한 워크스페이스 안에서 집는다. 전사 대기가 먼저, 그다음이 엔리치먼트 재개분."""
+    for statuses in (CLAIMABLE, ("enriching",)):
         recording = session.scalars(
             select(Recording)
-            .where(Recording.status == "enriching")
+            .where(
+                Recording.workspace_id == workspace_id,
+                Recording.status.in_(statuses),
+            )
             .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
             .with_for_update(skip_locked=True)
             .limit(1)
         ).first()
-    return recording
+        if recording is not None:
+            return recording
+    return None
 
 
 def _log_stage(
