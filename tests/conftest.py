@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from soriham_api.config import load_settings
 from soriham_api.models import Base
-from soriham_api.tenancy import create_workspace
+from soriham_api.tenancy import add_member, create_user, create_workspace
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 
@@ -74,3 +74,65 @@ def other_workspace(db):
     ws = create_workspace(db, slug="other-ws", name="다른 곳")
     db.commit()
     return ws
+
+
+@pytest.fixture
+def owner(db, workspace):
+    """workspace의 소유자. 대부분의 API 테스트가 이 사람으로 로그인한다."""
+    from soriham_api import auth
+
+    user = create_user(
+        db,
+        email="owner@example.com",
+        password_hash=auth.hash_password(TEST_PASSWORD),
+        display_name="주인",
+        status="active",
+    )
+    add_member(db, workspace, user, "owner")
+    user.default_workspace_id = workspace.id
+    db.commit()
+    return user
+
+
+TEST_PASSWORD = "시험용 암구호"
+
+
+def login(client, email: str, password: str = TEST_PASSWORD):
+    """로그인하고 CSRF 헤더를 클라이언트에 심는다.
+
+    쿠키는 TestClient가 알아서 들고 다닌다. 헤더는 브라우저가 자동으로 붙여주지
+    않으므로(그게 CSRF 방어의 요지다) 여기서 직접 넣는다.
+    """
+    resp = client.post("/api/auth/login", json={"email": email, "password": password})
+    assert resp.status_code == 200, resp.text
+    client.headers["x-csrf-token"] = client.cookies["soriham_csrf"]
+    return resp.json()
+
+
+def make_settings(**overrides):
+    """테스트용 설정. 새 필드가 늘 때 테스트 파일마다 고치지 않게 한 곳에 둔다."""
+    from soriham_api.config import Settings
+
+    base = dict(
+        database_url="unused",
+        audio_dirs=(),
+        runner_url="http://runner.test",
+        runner_upload=False,
+        stt_model=None,
+        stt_language=None,
+        cors_origins=("http://localhost:5174",),
+        upload_dir=None,
+        max_upload_bytes=4 * 1024 * 1024 * 1024,
+        default_workspace=None,
+        cookie_name="soriham_session",
+        # TestClient는 http로 부르므로 Secure 쿠키를 붙이면 되돌아오지 않는다
+        cookie_secure=False,
+        cookie_domain=None,
+        auto_approve=False,
+        expose_docs=False,
+        enrich_backend="off",
+        ollama_url="http://localhost:11434",
+        ollama_model="qwen3:8b",
+    )
+    base.update(overrides)
+    return Settings(**base)
