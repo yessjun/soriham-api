@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from soriham_api.config import load_settings
 from soriham_api.models import Base
+from soriham_api.tenancy import create_workspace
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 
@@ -57,3 +58,19 @@ def db(engine):
     with engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             conn.execute(table.delete())
+
+
+@pytest.fixture
+def workspace(db):
+    """녹음이 소속될 워크스페이스. 테넌시가 생긴 뒤로는 거의 모든 테스트가 하나 필요하다."""
+    ws = create_workspace(db, slug="test-ws", name="테스트")
+    db.commit()
+    return ws
+
+
+@pytest.fixture
+def other_workspace(db):
+    """격리를 확인할 때 쓰는 두 번째 워크스페이스."""
+    ws = create_workspace(db, slug="other-ws", name="다른 곳")
+    db.commit()
+    return ws

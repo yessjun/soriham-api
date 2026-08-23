@@ -14,6 +14,7 @@ docker compose up -d   # postgres
 uv sync
 uv run alembic upgrade head
 
+uv run soriham-api create-workspace --slug mine --name 내 보관함   # 최초 1회
 uv run soriham-api scan     # 녹음 폴더 스캔 등록
 uv run soriham-api watch    # 새 파일 감시 등록
 uv run soriham-api worker   # 변환 파이프라인 워커 (stt 러너 필요)
@@ -35,8 +36,12 @@ uv run soriham-api serve    # REST API (기본 8200 포트)
 | `GET /api/search?q=` | 전체 검색 (세그먼트·파일명·제목·요약) |
 | `GET /api/stats` | 상태별 집계, 처리 배속, ETA, 최근 에러 |
 
-id는 전부 uuid(공개 식별자)입니다. 원본 오디오는 제자리 인덱싱하며 이동·복사하지
-않습니다.
+id는 전부 uuid(공개 식별자)입니다. 스캔·감시로 들어온 원본 오디오는 제자리
+인덱싱하며 이동·복사하지 않고, 업로드본만 보관 폴더의 워크스페이스별 하위 경로에
+저장합니다.
+
+녹음은 워크스페이스 하나에 속합니다. 태그와 중복 판정도 워크스페이스 안에서만
+이뤄집니다.
 
 ## 전체 아키텍처
 

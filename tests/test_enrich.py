@@ -54,8 +54,8 @@ def test_summarize_long_transcript_chunks_then_combines():
     assert "부분 요약 3" in gen.json_prompts[0]
 
 
-def test_enricher_applies_title_summary_tags(db, tmp_path: Path):
-    register(db, tmp_path, ["a.wav"])
+def test_enricher_applies_title_summary_tags(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["a.wav"], workspace)
     process_one(db, FakeRunnerClient(), enricher=LlmEnricher(FakeGenerator()))
     row = db.scalars(select(Recording)).one()
     assert row.status == "done"
@@ -66,8 +66,8 @@ def test_enricher_applies_title_summary_tags(db, tmp_path: Path):
     assert db.scalars(select(Tag)).all().__len__() == 2
 
 
-def test_enricher_keeps_user_title(db, tmp_path: Path):
-    rows = register(db, tmp_path, ["a.wav"])
+def test_enricher_keeps_user_title(db, tmp_path: Path, workspace):
+    rows = register(db, tmp_path, ["a.wav"], workspace)
     rows[0].title = "사용자 지정 제목"
     db.commit()
     process_one(db, FakeRunnerClient(), enricher=LlmEnricher(FakeGenerator()))
@@ -76,12 +76,12 @@ def test_enricher_keeps_user_title(db, tmp_path: Path):
     assert row.summary == "핵심 요약입니다."
 
 
-def test_enrich_failure_still_marks_done(db, tmp_path: Path):
+def test_enrich_failure_still_marks_done(db, tmp_path: Path, workspace):
     class FailingEnricher:
         def enrich(self, session, recording):
             raise RuntimeError("모델 응답 없음")
 
-    register(db, tmp_path, ["a.wav"])
+    register(db, tmp_path, ["a.wav"], workspace)
     process_one(db, FakeRunnerClient(), enricher=FailingEnricher())
     row = db.scalars(select(Recording)).one()
     assert row.status == "done"
@@ -89,8 +89,8 @@ def test_enrich_failure_still_marks_done(db, tmp_path: Path):
     assert "모델 응답 없음" in row.error
 
 
-def test_requeue_unenriched_retries_failed_summaries(db, tmp_path: Path):
-    register(db, tmp_path, ["a.wav"])
+def test_requeue_unenriched_retries_failed_summaries(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["a.wav"], workspace)
 
     class FailingEnricher:
         def enrich(self, session, recording):
@@ -105,8 +105,8 @@ def test_requeue_unenriched_retries_failed_summaries(db, tmp_path: Path):
     assert row.summary == "핵심 요약입니다."
 
 
-def test_build_transcript_uses_speaker_names(db, tmp_path: Path):
-    register(db, tmp_path, ["a.wav"])
+def test_build_transcript_uses_speaker_names(db, tmp_path: Path, workspace):
+    register(db, tmp_path, ["a.wav"], workspace)
     process_one(db, FakeRunnerClient())
     row = db.scalars(select(Recording)).one()
     db.add(SpeakerName(recording_id=row.id, speaker_key="SPEAKER_00", display_name="김소리"))

@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from soriham_api.app import create_app
 from soriham_api.config import Settings
 from soriham_api.models import Recording
+from soriham_api.storage import workspace_upload_dir
 from soriham_api.uploads import (
     MAX_NAME_BYTES,
     STAGING_DIRNAME,
@@ -21,7 +22,9 @@ from soriham_api.uploads import (
 WAV = b"RIFF" + b"\x00" * 2048
 
 
-def make_client(engine, upload_dir: Path | None, max_mb: int = 4096) -> TestClient:
+def make_client(
+    engine, upload_dir: Path | None, max_mb: int = 4096, workspace_slug: str = "test-ws"
+) -> TestClient:
     settings = Settings(
         database_url="unused",
         audio_dirs=(),
@@ -32,6 +35,7 @@ def make_client(engine, upload_dir: Path | None, max_mb: int = 4096) -> TestClie
         cors_origins=("http://localhost:5174",),
         upload_dir=upload_dir,
         max_upload_bytes=max_mb * 1024 * 1024,
+        default_workspace=workspace_slug,
         enrich_backend="off",
         ollama_url="http://localhost:11434",
         ollama_model="qwen3:8b",
@@ -45,7 +49,7 @@ def leftovers(upload_dir: Path) -> list[Path]:
     return [p for p in staging.iterdir() if p.is_file()] if staging.is_dir() else []
 
 
-def test_업로드하면_저장되고_pending으로_등록된다(engine, db, tmp_path: Path):
+def test_업로드하면_저장되고_pending으로_등록된다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
@@ -61,12 +65,13 @@ def test_업로드하면_저장되고_pending으로_등록된다(engine, db, tmp
     saved = Path(recording.path)
     assert saved.is_file()
     assert saved.read_bytes() == WAV
-    # 파일명 날짜로 YYYY-MM 폴더에 들어간다
-    assert saved.parent == up / "2026-08"
+    # 워크스페이스 하위의 파일명 날짜 폴더에 들어간다 — 워크스페이스가 갈리면
+    # 경로가 갈려서 남의 업로드와 이름이 부딪힐 일이 없다
+    assert saved.parent == workspace_upload_dir(up, workspace.public_id) / "2026-08"
     assert leftovers(up) == []
 
 
-def test_오디오가_아닌_확장자는_거부한다(engine, db, tmp_path: Path):
+def test_오디오가_아닌_확장자는_거부한다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
@@ -77,7 +82,7 @@ def test_오디오가_아닌_확장자는_거부한다(engine, db, tmp_path: Pat
     assert db.scalar(select(Recording)) is None
 
 
-def test_크기_상한을_넘으면_413이고_잔여물이_없다(engine, db, tmp_path: Path):
+def test_크기_상한을_넘으면_413이고_잔여물이_없다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up, max_mb=1)
 
@@ -90,7 +95,7 @@ def test_크기_상한을_넘으면_413이고_잔여물이_없다(engine, db, tm
     assert db.scalar(select(Recording)) is None
 
 
-def test_같은_파일을_다시_올리면_409이고_사본이_안_생긴다(engine, db, tmp_path: Path):
+def test_같은_파일을_다시_올리면_409이고_사본이_안_생긴다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
@@ -107,7 +112,7 @@ def test_같은_파일을_다시_올리면_409이고_사본이_안_생긴다(eng
     assert [p.name for p in up.rglob("*.wav")] == ["회의.wav"]
 
 
-def test_UPLOAD_DIR이_없으면_503(engine, db, tmp_path: Path):
+def test_UPLOAD_DIR이_없으면_503(engine, db, tmp_path: Path, workspace):
     client = make_client(engine, None)
 
     resp = client.post("/api/recordings", files={"file": ("a.wav", WAV, "audio/wav")})
@@ -115,7 +120,7 @@ def test_UPLOAD_DIR이_없으면_503(engine, db, tmp_path: Path):
     assert resp.status_code == 503
 
 
-def test_이름이_같으면_뒤에_번호를_붙여_저장한다(engine, db, tmp_path: Path):
+def test_이름이_같으면_뒤에_번호를_붙여_저장한다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
@@ -123,7 +128,8 @@ def test_이름이_같으면_뒤에_번호를_붙여_저장한다(engine, db, tm
     # 내용이 달라야 중복 판정에 걸리지 않는다
     client.post("/api/recordings", files={"file": ("20260817_090000.wav", WAV + b"x", "audio/wav")})
 
-    names = sorted(p.name for p in (up / "2026-08").iterdir())
+    ws_month = workspace_upload_dir(up, workspace.public_id) / "2026-08"
+    names = sorted(p.name for p in ws_month.iterdir())
     assert names == ["20260817_090000-2.wav", "20260817_090000.wav"]
 
 
@@ -142,7 +148,7 @@ def test_파일명에서_경로_성분을_제거한다(raw, expected):
     assert safe_filename(raw) == expected
 
 
-def test_경로_탈출을_시도해도_보관_폴더_안에만_저장된다(engine, db, tmp_path: Path):
+def test_경로_탈출을_시도해도_보관_폴더_안에만_저장된다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
@@ -155,7 +161,7 @@ def test_경로_탈출을_시도해도_보관_폴더_안에만_저장된다(engi
     assert Path(recording.path).name == "evil.wav"
 
 
-def test_빈_파일은_거부한다(engine, db, tmp_path: Path):
+def test_빈_파일은_거부한다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
@@ -166,7 +172,7 @@ def test_빈_파일은_거부한다(engine, db, tmp_path: Path):
     assert db.scalar(select(Recording)) is None
 
 
-def test_파일만_지워진_기존_녹음의_경로를_덮어쓰지_않는다(engine, db, tmp_path: Path):
+def test_파일만_지워진_기존_녹음의_경로를_덮어쓰지_않는다(engine, db, tmp_path: Path, workspace):
     """DB에는 남아 있고 디스크에서만 사라진 경로가 있어도 새 업로드가 그 자리를
     차지하면 안 된다 — 그 행이 엉뚱한 오디오를 가리키게 된다."""
     up = tmp_path / "uploads"
@@ -192,7 +198,7 @@ def test_파일만_지워진_기존_녹음의_경로를_덮어쓰지_않는다(e
     assert Path(new.path).read_bytes() == WAV + b"other"
 
 
-def test_missing_행은_중복_판정에서_제외한다(engine, db, tmp_path: Path):
+def test_missing_행은_중복_판정에서_제외한다(engine, db, tmp_path: Path, workspace):
     """원본이 유실된 녹음의 백업본을 다시 올릴 수 있어야 한다."""
     up = tmp_path / "uploads"
     client = make_client(engine, up)
@@ -210,7 +216,7 @@ def test_missing_행은_중복_판정에서_제외한다(engine, db, tmp_path: P
     assert resp.json()["status"] == "pending"
 
 
-def test_이름이_너무_길면_잘라서_저장한다(engine, db, tmp_path: Path):
+def test_이름이_너무_길면_잘라서_저장한다(engine, db, tmp_path: Path, workspace):
     up = tmp_path / "uploads"
     client = make_client(engine, up)
 
