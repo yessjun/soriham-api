@@ -164,7 +164,7 @@ def register(app: FastAPI, deps: Deps) -> None:
     ) -> IssuedShareLinkOut:
         password = body.password or ""
         if password and not password.strip():
-            # 걸었다고 믿는데 안 걸린 링크가 나가는 것이 가장 나쁘다
+            # 비밀번호를 걸었다고 믿는데 실제로는 안 걸린 링크가 나간다
             raise HTTPException(422, "비밀번호가 비어 있습니다")
         try:
             issued = create_link(

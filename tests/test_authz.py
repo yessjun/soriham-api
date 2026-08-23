@@ -409,7 +409,7 @@ def test_행이_위조돼도_남의_파일은_내보내지_않는다(app_client,
     assert forged.status_code == 404
 
     # 뿌리 밖인 것과 파일이 없는 것은 같은 답이어야 한다. 다르면 어떤 경로가
-    # 존재하는지 알려주는 셈이다
+    # 어떤 경로가 있는지 알려주게 된다
     mine.path = str(tmp_path / "rec" / "사라진.wav")
     db.commit()
     missing = app_client.get(f"/api/recordings/{mine.public_id}/audio")

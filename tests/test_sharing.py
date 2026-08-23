@@ -238,7 +238,7 @@ def test_비밀번호를_바꾸면_나간_잠금_해제가_죽는다(client, gue
 
 
 def test_공백만_넣은_비밀번호는_링크를_주지_않는다(client, mine):
-    """걸었다고 믿는데 안 걸린 링크가 나가는 것이 가장 나쁘다."""
+    """비밀번호를 걸었다고 믿는데 실제로는 안 걸린 링크가 나간다."""
     resp = client.post(f"/api/recordings/{mine.public_id}/links", json={"password": "   "})
 
     assert resp.status_code == 422
