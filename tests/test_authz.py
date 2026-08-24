@@ -604,3 +604,15 @@ def test_짧은_비밀번호로는_가입할_수_없다(app_client):
 
     assert resp.status_code == 422
     assert "8자" in resp.json()["detail"]
+
+
+def test_자기_자신에서_온_로그인은_받는다(app_client, owner):
+    """동일 오리진 배포가 기본 배치다. 그때 Origin은 이 서버의 주소이고 CORS 목록에는
+    개발용 오리진만 있다. 이걸 빼먹으면 운영 배치에서 로그인 자체가 막힌다."""
+    resp = app_client.post(
+        "/api/auth/login",
+        json={"email": owner.email, "password": TEST_PASSWORD},
+        headers={"origin": str(app_client.base_url).rstrip("/")},
+    )
+
+    assert resp.status_code == 200

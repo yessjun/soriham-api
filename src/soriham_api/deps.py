@@ -118,9 +118,17 @@ def build_deps(cfg: Settings, factory: sessionmaker[Session], upload_lock: objec
 
         Origin이 없는 요청은 통과시킨다. 브라우저는 이 요청에 Origin을 반드시 싣고,
         안 싣는 쪽은 curl이나 CLI다.
+
+        자기 자신에서 온 요청도 통과시킨다. 동일 오리진 배포가 이 서비스의 기본 배치인데,
+        그때 Origin은 이 서버의 주소이고 CORS 목록에는 개발용 오리진만 있다. 이것을
+        빼먹으면 운영 배치에서 로그인 자체가 막힌다.
         """
         origin = request.headers.get("origin")
-        if origin and origin not in cfg.cors_origins:
+        if not origin:
+            return
+        if origin == f"{request.url.scheme}://{request.url.netloc}":
+            return
+        if origin not in cfg.cors_origins:
             raise HTTPException(403, "허용되지 않은 곳에서 온 요청입니다")
 
     def require_csrf(request: Request, user: User = Depends(require_user)) -> None:
