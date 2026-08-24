@@ -493,3 +493,47 @@ def test_컨테이너가_적어둔_길이가_거짓이면_실측으로_청구한
         select(JobLog.audio_sec).where(JobLog.stage == "transcribe", JobLog.status == "done")
     )
     assert billed == 5400.0
+
+
+def test_한도_해제가_워크스페이스마다_한_번만_잰다(db, workspace, other_workspace, tmp_path):
+    """한도는 워크스페이스에 붙는다. 행마다 다시 재면 같은 집계를 건수만큼 돌리는데,
+    이 정리는 유휴 때만이 아니라 상시로 돈다."""
+    from sqlalchemy import event
+
+    workspace.quota_minutes = None
+    other_workspace.quota_minutes = None
+    db.commit()
+    for i in range(5):
+        r = make_recording(db, workspace, name=f"{i}.wav")
+        r.status = "quota_blocked"
+    db.commit()
+
+    counted: list[str] = []
+
+    def watch(conn, cursor, statement, params, context, executemany):
+        if "sum(" in statement.lower() and "job_log" in statement.lower():
+            counted.append(statement)
+
+    event.listen(db.get_bind(), "before_cursor_execute", watch)
+    try:
+        assert release_quota_blocked(db) == 5
+    finally:
+        event.remove(db.get_bind(), "before_cursor_execute", watch)
+
+    # 워크스페이스가 하나뿐이니 전사 시간 집계도 한 번이어야 한다
+    assert len(counted) == 1, f"집계가 {len(counted)}회 돌았다"
+
+
+def test_한도_해제가_옛_진행률을_지운다(db, workspace, tmp_path):
+    workspace.quota_minutes = None
+    db.commit()
+    recording = make_recording(db, workspace)
+    recording.status = "quota_blocked"
+    recording.progress = 0.47
+    db.commit()
+
+    assert release_quota_blocked(db) == 1
+
+    db.refresh(recording)
+    assert recording.status == "pending"
+    assert recording.progress is None

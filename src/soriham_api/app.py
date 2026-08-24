@@ -381,6 +381,10 @@ def create_app(
             raise HTTPException(422, "실패한 녹음만 다시 시도할 수 있습니다")
         recording.status = resume_status(recording)
         recording.error = None
+        # 옛 진행률을 달고 큐로 돌아가면 화면이 아직 시작도 안 한 항목에 47%와
+        # 남은 시간을 그린다. 워커 쪽 되돌리기와 같은 값을 지운다
+        recording.progress = None
+        recording.stage_started_at = None
         session.commit()
         return _summary(recording)
 
