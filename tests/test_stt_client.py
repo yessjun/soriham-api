@@ -5,7 +5,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from soriham_api.stt_client import RunnerClient, RunnerJobFailed, RunnerJobLost
+from soriham_api.stt_client import (
+    RunnerClient,
+    RunnerJobFailed,
+    RunnerJobLost,
+    RunnerUnavailable,
+)
 
 RESULT = {
     "language": "ko",
@@ -105,3 +110,38 @@ def test_upload_mode_sends_file(tmp_path: Path):
     )
     client.transcribe(audio, model=None, language=None, diarize=True)
     assert b"pcm" in seen[0].read()
+
+
+def test_러너가_이_파일을_거절하면_큐로_되돌리지_않는다(tmp_path: Path):
+    """413이나 403은 이 요청에 대한 답이라 다시 보내도 같은 답이 온다. 러너 장애로
+    다루면 큐로 돌아가 같은 녹음을 영원히 다시 집는다."""
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFF")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(413, json={"detail": "업로드 크기 한도를 초과했습니다"})
+
+    client = RunnerClient(
+        "http://runner", transport=httpx.MockTransport(handler), poll_interval_sec=0
+    )
+
+    with pytest.raises(RunnerJobFailed) as caught:
+        client.submit(audio, model=None, language=None, diarize=False)
+
+    assert "413" in str(caught.value)
+    assert "크기 한도" in str(caught.value)
+
+
+def test_러너가_넘어진_것은_큐로_되돌린다(tmp_path: Path):
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFF")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="unavailable")
+
+    client = RunnerClient(
+        "http://runner", transport=httpx.MockTransport(handler), poll_interval_sec=0
+    )
+
+    with pytest.raises(RunnerUnavailable):
+        client.submit(audio, model=None, language=None, diarize=False)

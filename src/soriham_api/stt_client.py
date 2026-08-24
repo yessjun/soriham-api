@@ -11,6 +11,25 @@ from typing import Any
 import httpx
 
 
+def _is_runner_fault(exc: httpx.HTTPStatusError) -> bool:
+    """러너 쪽 문제라 기다리면 풀리는가, 이 요청이 문제라 기다려도 그대로인가.
+
+    5xx는 러너가 넘어진 것이고 429는 잠시 뒤 다시 오라는 뜻이다. 나머지 4xx는 이
+    요청에 대한 답이라 재시도해도 같은 답이 온다.
+    """
+    code = exc.response.status_code
+    return code >= 500 or code == 429
+
+
+def _detail(exc: httpx.HTTPStatusError) -> str:
+    """러너가 준 사유를 그대로 옮긴다. 화면에 그 문장이 나간다."""
+    try:
+        detail = exc.response.json().get("detail")
+    except ValueError:
+        detail = None
+    return f"러너가 거절함 ({exc.response.status_code}): {detail or exc.response.reason_phrase}"
+
+
 class RunnerUnavailable(Exception):
     """러너에 닿지 못했다. 이 파일의 문제가 아니라 러너 쪽 문제다."""
 
@@ -62,10 +81,16 @@ class RunnerClient:
             data["language"] = language
         try:
             return self._submit(data, audio_path)
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+        except httpx.TransportError as exc:
             # 못 닿은 것과 이 파일이 문제인 것은 다르다. 섞으면 러너가 죽어 있는 동안
             # 대기열 전체가 error로 바뀐다
             raise RunnerUnavailable(str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            if _is_runner_fault(exc):
+                raise RunnerUnavailable(str(exc)) from exc
+            # 4xx는 이 요청이 문제라는 뜻이다(크기 초과, 허용 밖 경로, 파일 없음).
+            # 이걸 러너 장애로 다루면 큐로 되돌아가 같은 녹음을 영원히 다시 집는다
+            raise RunnerJobFailed(_detail(exc)) from exc
 
     def _submit(self, data: dict[str, Any], audio_path: Path) -> str:
         with self._client() as client:
@@ -89,8 +114,16 @@ class RunnerClient:
                     if resp.status_code == 404:
                         raise RunnerJobLost(job_id)
                     resp.raise_for_status()
-                except (httpx.TransportError, httpx.HTTPStatusError):
+                except httpx.HTTPStatusError as exc:
+                    if not _is_runner_fault(exc):
+                        raise RunnerJobFailed(_detail(exc)) from exc
                     # 장시간 변환 중 폴링 1회 실패로 잡을 버리지 않는다
+                    errors += 1
+                    if errors > 5:
+                        raise RunnerUnavailable(f"러너 응답 없음: {job_id}") from None
+                    time.sleep(self.poll_interval_sec)
+                    continue
+                except httpx.TransportError:
                     errors += 1
                     if errors > 5:
                         raise RunnerUnavailable(f"러너 응답 없음: {job_id}") from None
