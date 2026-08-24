@@ -20,7 +20,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from soriham_api.auth import sweep_sessions
 from soriham_api.ingest import resume_status
 from soriham_api.models import JobLog, Recording, Segment, Workspace
-from soriham_api.quota import DurationUnknown, allows_transcription, transcription_block
+from soriham_api.quota import (
+    DurationUnknown,
+    QuotaExceeded,
+    check_minutes,
+    measure,
+    transcription_block,
+)
 from soriham_api.ratelimit import sweep as sweep_attempts
 from soriham_api.stt_client import RunnerClient, RunnerUnavailable
 
@@ -46,6 +52,8 @@ HEARTBEAT_EVERY = timedelta(seconds=30)
 # 바쁠 때도 정리가 돌게 한다. 유휴에만 걸어 두면 백로그를 도는 몇 주 동안 한 번도
 # 안 돌아 한도 해제가 멈춘다
 MAINTENANCE_EVERY = 20
+# 한 번에 갱신할 행 수. 한도가 찬 워크스페이스는 보류가 수천 건까지 쌓인다
+MAINTENANCE_CHUNK = 200
 
 
 class Enricher(Protocol):
@@ -156,18 +164,56 @@ def idle_maintenance(session_factory: sessionmaker[Session]) -> None:
 
 
 def release_quota_blocked(session: Session) -> int:
-    """한도에 걸려 세워둔 녹음 중 지금은 통과하는 것을 큐로 되돌린다."""
-    blocked = session.scalars(select(Recording).where(Recording.status == "quota_blocked")).all()
-    released = 0
-    for recording in blocked:
-        if allows_transcription(session, recording):
-            # pending으로 일괄 되돌리면 이미 전사된 녹음이 다시 전사돼 같은 오디오가
-            # 한도를 두 번 깎는다. 저장된 산출물이 있으면 그 지점부터 이어야 한다
-            recording.status = resume_status(recording)
-            released += 1
-    if released:
-        session.commit()
-    return released
+    """한도에 걸려 세워둔 녹음 중 지금은 통과하는 것을 큐로 되돌린다.
+
+    한도는 워크스페이스에 붙으므로 사용량은 워크스페이스마다 한 번만 잰다. 행마다 다시
+    재면 같은 집계를 건수만큼 돌린다 — 이 정리는 유휴 때만이 아니라 상시로 돈다.
+    """
+    rows = session.execute(
+        select(Recording.id, Recording.workspace_id, Recording.duration_sec).where(
+            Recording.status == "quota_blocked"
+        )
+    ).all()
+    if not rows:
+        return 0
+
+    usages: dict[int, object] = {}
+    freed: list[int] = []
+    for recording_id, workspace_id, duration_sec in rows:
+        if workspace_id not in usages:
+            workspace = session.get(Workspace, workspace_id)
+            usages[workspace_id] = measure(session, workspace) if workspace is not None else None
+        usage = usages[workspace_id]
+        if usage is None:
+            freed.append(recording_id)
+            continue
+        try:
+            check_minutes(usage, duration_sec)
+        except QuotaExceeded:
+            continue
+        freed.append(recording_id)
+    if not freed:
+        return 0
+
+    # 재개 지점 판정은 resume_status와 같다. 일괄로 pending을 주면 이미 전사된 녹음이
+    # 다시 전사돼 같은 오디오가 한도를 두 번 깎는다
+    has_segments = exists().where(Segment.recording_id == Recording.id)
+    for start in range(0, len(freed), MAINTENANCE_CHUNK):
+        session.execute(
+            update(Recording)
+            .where(Recording.id.in_(freed[start : start + MAINTENANCE_CHUNK]))
+            .values(
+                status=case(
+                    (Recording.summary.is_not(None), "done"),
+                    (has_segments, ENRICH_WAITING),
+                    else_="pending",
+                ),
+                progress=None,
+                stage_started_at=None,
+            )
+        )
+    session.commit()
+    return len(freed)
 
 
 def claim_next(session: Session) -> Recording | None:
