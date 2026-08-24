@@ -10,7 +10,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from soriham_api.models import Recording
@@ -213,16 +213,18 @@ def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict
     # source까지 보는 이유: 스캔 워크스페이스에 섞여 들어온 업로드본도 지켜야 한다.
     #
     prefixes = tuple(str(d.resolve()) + os.sep for d in dirs if d.is_dir())
+    # 판정에 필요한 것은 id와 경로뿐이다. 행 객체로 받으면 백로그 규모에서 수만 개가
+    # 통째로 세션에 올라온다
     gone = [
-        recording
-        for recording in session.scalars(
-            select(Recording).where(
+        row_id
+        for row_id, path in session.execute(
+            select(Recording.id, Recording.path).where(
                 Recording.status != "missing",
                 Recording.workspace_id == workspace_id,
                 Recording.source == "scan",
             )
         )
-        if recording.path.startswith(prefixes) and recording.path not in seen
+        if path.startswith(prefixes) and path not in seen
     ]
     # 이번 스캔에서 오디오를 하나도 못 봤는데 지워야 할 것이 무더기라면 폴더가 빈 것이
     # 아니라 디스크가 없는 것이다. 마운트가 풀린 자리는 빈 폴더로 남아 is_dir()가
@@ -233,13 +235,11 @@ def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict
             "오디오를 하나도 못 봤는데 %d건이 사라진 것으로 보임 — 유실 판정을 건너뜀", len(gone)
         )
         gone = []
-    for recording in gone:
-        recording.status = "missing"
-        stats["missing"] += 1
-        since_commit += 1
-        if since_commit >= SCAN_COMMIT_EVERY:
-            session.commit()
-            since_commit = 0
+    for start in range(0, len(gone), SCAN_COMMIT_EVERY):
+        chunk = gone[start : start + SCAN_COMMIT_EVERY]
+        session.execute(update(Recording).where(Recording.id.in_(chunk)).values(status="missing"))
+        stats["missing"] += len(chunk)
+        session.commit()
 
     session.commit()
     return stats
