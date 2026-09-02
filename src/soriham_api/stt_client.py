@@ -42,6 +42,10 @@ class RunnerJobFailed(Exception):
     """러너가 잡을 error로 끝냈다."""
 
 
+class RunnerJobTimedOut(Exception):
+    """잡이 제한 시간 안에 안 끝났다. 러너가 물린 것으로 본다."""
+
+
 # (단계, 진행률 0~1 또는 None) — 러너가 진행 정보를 안 주면 (None, None)
 ProgressHook = Callable[[str | None, float | None], None]
 
@@ -104,11 +108,22 @@ class RunnerClient:
             resp.raise_for_status()
             return resp.json()["job_id"]
 
-    def wait(self, job_id: str, on_progress: ProgressHook | None = None) -> dict[str, Any]:
-        """잡이 끝날 때까지 폴링한다. 러너가 잡을 잊었으면 RunnerJobLost."""
+    def wait(
+        self,
+        job_id: str,
+        on_progress: ProgressHook | None = None,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        """잡이 끝날 때까지 폴링한다. 러너가 잡을 잊었으면 RunnerJobLost.
+
+        deadline은 monotonic 기준 시각이다. 러너가 running을 계속 주면 이 폴링은
+        영원히 도는데, 폴링마다 호출자가 하트비트를 찍으므로 정지 회수도 안 걸린다.
+        """
         errors = 0
         with self._client() as client:
             while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    raise RunnerJobTimedOut(f"러너 잡이 제한 시간을 넘김: {job_id}")
                 try:
                     resp = client.get(f"/jobs/{job_id}")
                     if resp.status_code == 404:
@@ -149,12 +164,18 @@ class RunnerClient:
         diarize: bool,
         max_resubmits: int = 2,
         on_progress: ProgressHook | None = None,
+        timeout_sec: float | None = None,
     ) -> dict[str, Any]:
-        """제출부터 완료까지. 러너 재시작으로 잡이 사라지면 재제출한다."""
+        """제출부터 완료까지. 러너 재시작으로 잡이 사라지면 재제출한다.
+
+        timeout_sec은 재제출까지 합친 총 시간이다 — 재제출마다 시계를 되돌리면
+        물린 러너 앞에서 상한이 무한해진다.
+        """
+        deadline = None if timeout_sec is None else time.monotonic() + timeout_sec
         for attempt in range(max_resubmits + 1):
             job_id = self.submit(audio_path, model=model, language=language, diarize=diarize)
             try:
-                return self.wait(job_id, on_progress)
+                return self.wait(job_id, on_progress, deadline)
             except RunnerJobLost:
                 if attempt == max_resubmits:
                     raise
