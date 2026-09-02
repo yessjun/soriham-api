@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from soriham_api import ingest
 from soriham_api.ingest import (
+    backfill_content_hashes,
+    content_hash,
     ingest_file,
     parse_recorded_at,
     partial_hash,
@@ -229,3 +231,60 @@ def test_디스크가_통째로_안_보이면_유실로_찍지_않는다(db, tmp
 
     assert ingest.scan(db, (base,), workspace_id=workspace.id)["missing"] == 0
     assert db.scalar(select(func.count()).where(Recording.status == "missing")) == 0
+
+
+def test_이름이_바뀌면_새_행이_아니라_경로가_옮겨간다(db, tmp_path: Path, workspace):
+    """새 행을 만들면 녹취록은 사라진 행에 남고 실물은 중복으로 표시된다.
+
+    검색으로 찾아 들어간 쪽에서 재생이 안 되는 상태가 된다.
+    """
+    old = write_wav(tmp_path / "rec" / "20260101_회의.wav", b"same-body" * 50)
+    scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
+    row = db.scalars(select(Recording)).one()
+    row.status = "done"
+    row.summary = "요약"
+    db.commit()
+
+    old.rename(tmp_path / "rec" / "20260101_기획회의.wav")
+    stats = scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
+
+    assert stats["moved"] == 1
+    assert stats["new"] == 0 and stats["duplicate"] == 0 and stats["missing"] == 0
+    assert db.scalar(select(func.count()).select_from(Recording)) == 1
+    db.refresh(row)
+    assert row.filename == "20260101_기획회의.wav"
+    assert row.status == "done"  # 요약까지 끝난 체크포인트를 지킨다
+
+
+def test_원본이_그대로면_같은_내용은_중복이다(db, tmp_path: Path, workspace):
+    write_wav(tmp_path / "rec" / "a.wav", b"body" * 50)
+    write_wav(tmp_path / "rec" / "복사본.wav", b"body" * 50)
+    stats = scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
+
+    assert stats["new"] == 1 and stats["duplicate"] == 1 and stats["moved"] == 0
+
+
+def test_전체_해시는_가운데가_다른_파일을_가른다(tmp_path: Path):
+    """부분 해시는 앞뒤 1MB만 본다. 가운데가 깨진 복사본은 이쪽만 잡는다."""
+    size = 3 * 1024 * 1024
+    body = bytearray(b"x" * size)
+    a = write_wav(tmp_path / "a.wav", bytes(body))
+    body[size // 2] = ord("z")
+    b = write_wav(tmp_path / "b.wav", bytes(body))
+
+    assert partial_hash(a, size) == partial_hash(b, size)
+    assert content_hash(a) != content_hash(b)
+
+
+def test_백필이_빈_해시를_채운다(db, tmp_path: Path, workspace):
+    write_wav(tmp_path / "rec" / "a.wav", b"x" * 10)
+    scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
+    row = db.scalars(select(Recording)).one()
+    row.content_hash = None  # 컬럼이 생기기 전에 등록된 행
+    db.commit()
+
+    stats = backfill_content_hashes(db, workspace_id=workspace.id)
+
+    assert stats == {"filled": 1, "missing": 0, "remaining": 0}
+    db.refresh(row)
+    assert row.content_hash is not None

@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     quota_p.add_argument("--workspace", required=True, help="슬러그")
     quota_p.add_argument("--minutes", help="전사 시간 한도(분). unlimited면 무제한")
     quota_p.add_argument("--gb", help="저장 용량 한도(GB). unlimited면 무제한")
+    backfill = sub.add_parser("backfill-hashes", help="전체 해시가 빈 녹음을 채운다")
+    backfill.add_argument("--workspace", help="슬러그. 없으면 전체")
+    backfill.add_argument("--limit", type=int, help="한 번에 처리할 건수")
     serve = sub.add_parser("serve", help="REST API 서버 실행")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8200)
@@ -194,15 +197,30 @@ def main(argv: list[str] | None = None) -> int:
         except WorkspaceNotFound as exc:
             parser.error(str(exc))
 
+    if args.command == "backfill-hashes":
+        from soriham_api.ingest import backfill_content_hashes
+
+        with session_factory() as session:
+            ws_id = None
+            if args.workspace:
+                from soriham_api.tenancy import WorkspaceNotFound, get_workspace
+
+                try:
+                    ws_id = get_workspace(session, args.workspace).id
+                except WorkspaceNotFound as exc:
+                    parser.error(str(exc))
+            stats = backfill_content_hashes(session, workspace_id=ws_id, limit=args.limit)
+        print("해시 채움 {filled}, 파일 없음 {missing}, 남은 대상 {remaining}".format(**stats))
+        return 0
+
     if args.command == "scan":
         from soriham_api.ingest import scan
 
         with session_factory() as session:
             stats = scan(session, settings.audio_dirs, workspace_id=_workspace_id(session))
         print(
-            "스캔 완료: 신규 {new}, 중복 {duplicate}, 재등장 {reappeared}, 유실 {missing}".format(
-                **stats
-            )
+            "스캔 완료: 신규 {new}, 중복 {duplicate}, 재등장 {reappeared}, "
+            "이동 {moved}, 유실 {missing}".format(**stats)
         )
         return 0
 

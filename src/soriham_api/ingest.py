@@ -10,7 +10,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from soriham_api.models import Recording
@@ -32,6 +32,7 @@ AUDIO_EXTENSIONS = {
 }
 
 _PARTIAL_CHUNK = 1024 * 1024  # 앞뒤 1MB
+_HASH_CHUNK = 1024 * 1024  # 전체 해시 읽기 단위
 
 # 녹음기·녹음앱에서 흔한 파일명 날짜 패턴 (구체적인 것부터)
 _DATETIME_PATTERNS = [
@@ -53,6 +54,20 @@ def partial_hash(path: Path, size: int) -> str:
         if size > _PARTIAL_CHUNK:
             f.seek(-_PARTIAL_CHUNK, 2)
             h.update(f.read(_PARTIAL_CHUNK))
+    return h.hexdigest()
+
+
+def content_hash(path: Path) -> str:
+    """파일 내용 전체의 sha256.
+
+    부분 해시는 크기와 청크 크기(1MB)가 키에 들어가 있어 그 상수를 바꾸는 순간 예전
+    값과 비교가 깨진다. 개명·이동을 건너 같은 녹음을 다시 찾는 키로는 파라미터가 없는
+    쪽이 맞다. 가운데가 깨진 복사본도 이쪽만 잡는다.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(_HASH_CHUNK):
+            h.update(chunk)
     return h.hexdigest()
 
 
@@ -110,20 +125,37 @@ def resume_status(recording: Recording) -> str:
     return "pending"
 
 
-def find_duplicate(session: Session, digest: str, *, workspace_id: int) -> Recording | None:
-    """같은 워크스페이스 안에서 같은 부분 해시로 등록된 원본을 찾는다.
-
-    duplicate는 물론 missing도 제외한다 — 파일이 사라진 행을 원본으로 치면, 백업본을
-    다시 넣으려 할 때 중복으로 막혀 복구할 방법이 없어진다.
+def find_by_content(session: Session, full: str, *, workspace_id: int) -> list[Recording]:
+    """같은 워크스페이스에서 같은 내용으로 등록된 행들. 중복 표시된 행은 뺀다.
 
     범위를 워크스페이스로 좁히는 이유: 전역으로 찾으면 같은 파일을 올려보는 것만으로
     남이 그 파일을 가졌는지, 무슨 이름을 붙였는지 알 수 있다.
+    """
+    return list(
+        session.scalars(
+            select(Recording)
+            .where(
+                Recording.workspace_id == workspace_id,
+                Recording.content_hash == full,
+                Recording.status != "duplicate",
+            )
+            .order_by(Recording.id)
+        )
+    )
+
+
+def find_duplicate(session: Session, digest: str, *, workspace_id: int) -> Recording | None:
+    """전체 해시가 없던 시절 행과의 중복 판정. 부분 해시로만 본다.
+
+    백필이 끝나면 도달하지 않는 경로다. missing을 제외하는 이유는 아래 이동 판정과
+    같다 — 파일이 사라진 행을 원본으로 치면 백업본을 되돌릴 길이 막힌다.
     """
     return session.scalar(
         select(Recording)
         .where(
             Recording.workspace_id == workspace_id,
             Recording.partial_hash == digest,
+            Recording.content_hash.is_(None),
             Recording.status.not_in(("duplicate", "missing")),
         )
         .order_by(Recording.id)
@@ -153,7 +185,25 @@ def ingest_file(
 
     size = path.stat().st_size
     digest = partial_hash(path, size)
-    original = find_duplicate(session, digest, workspace_id=workspace_id)
+    full = content_hash(path)
+
+    # 같은 내용이 이미 있나. 그 행의 파일이 사라졌다면 중복이 아니라 이동이다 —
+    # 새 행을 만들면 녹취록은 사라진 행에 남고 실물에는 duplicate 표시가 붙어,
+    # 검색으로 찾아 들어간 쪽에서 재생이 안 된다
+    same = find_by_content(session, full, workspace_id=workspace_id)
+    moved = next((row for row in same if not Path(row.path).exists()), None)
+    if moved is not None:
+        logger.info("경로 이동: %s -> %s", moved.filename, path.name)
+        moved.path = str(path)
+        moved.filename = path.name
+        moved.size_bytes = size
+        moved.partial_hash = digest
+        # 새 이름에 날짜가 있으면 그것을 쓰고, 없으면 알던 값을 지킨다
+        moved.recorded_at = parse_recorded_at(path.name) or moved.recorded_at
+        moved.status = resume_status(moved)
+        return None
+
+    original = same[0] if same else find_duplicate(session, digest, workspace_id=workspace_id)
     recording = Recording(
         workspace_id=workspace_id,
         source=source,
@@ -162,6 +212,7 @@ def ingest_file(
         filename=path.name,
         size_bytes=size,
         partial_hash=digest,
+        content_hash=full,
         recorded_at=parse_recorded_at(path.name),
         duration_sec=probe_duration(path),
         status="duplicate" if original is not None else "pending",
@@ -169,6 +220,36 @@ def ingest_file(
     )
     session.add(recording)
     return recording
+
+
+def backfill_content_hashes(
+    session: Session, *, workspace_id: int | None = None, limit: int | None = None
+) -> dict[str, int]:
+    """전체 해시가 빈 행을 채운다. 컬럼이 생기기 전에 등록된 녹음이 대상이다.
+
+    파일을 통째로 읽으므로 한 번에 다 돌리기 부담스러우면 `limit`으로 나눠 돌린다.
+    파일이 없는 행은 건너뛴다 — 드라이브를 다시 붙이고 나서 채우면 된다.
+    """
+    query = select(Recording).where(Recording.content_hash.is_(None)).order_by(Recording.id)
+    if workspace_id is not None:
+        query = query.where(Recording.workspace_id == workspace_id)
+    remaining = session.scalar(select(func.count()).select_from(query.subquery()))
+    if limit is not None:
+        query = query.limit(limit)
+
+    filled = 0
+    missing = 0
+    for recording in session.scalars(query):
+        path = Path(recording.path)
+        if not path.is_file():
+            missing += 1
+            continue
+        recording.content_hash = content_hash(path)
+        filled += 1
+        if filled % SCAN_COMMIT_EVERY == 0:
+            session.commit()
+    session.commit()
+    return {"filled": filled, "missing": missing, "remaining": (remaining or 0) - filled}
 
 
 # 스캔 도중 몇 건마다 커밋할지. 1만 개짜리 폴더를 한 트랜잭션으로 몰면 파일마다 도는
@@ -181,7 +262,7 @@ SWEEP_BLACKOUT_MIN = 20
 
 def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict[str, int]:
     """폴더들을 스캔해 신규 등록·재등장·유실을 반영하고 집계를 돌려준다."""
-    stats = {"new": 0, "duplicate": 0, "reappeared": 0, "missing": 0}
+    stats = {"new": 0, "duplicate": 0, "reappeared": 0, "moved": 0, "missing": 0}
 
     since_commit = 0
     seen: set[str] = set()
@@ -201,6 +282,9 @@ def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict
                 stats["duplicate" if created.status == "duplicate" else "new"] += 1
             elif before == "missing":
                 stats["reappeared"] += 1
+            elif before is None:
+                # 이 경로에 행이 없었는데 새 행도 안 생겼다 = 다른 경로의 행이 옮겨왔다
+                stats["moved"] += 1
             since_commit += 1
             if since_commit >= SCAN_COMMIT_EVERY:
                 session.commit()

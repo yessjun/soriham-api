@@ -332,6 +332,7 @@ class Recording(TimestampMixin, Base):
         # 중복 판정은 워크스페이스 안에서만 한다 — 전역이면 남이 같은 파일을 가졌는지
         # 알아내는 탐침이 된다
         Index("ix_recordings_workspace_partial_hash", "workspace_id", "partial_hash"),
+        Index("ix_recordings_workspace_content_hash", "workspace_id", "content_hash"),
         # 한국어 부분 문자열 검색(pg_trgm). 표현식이 아니라 컬럼 인덱스지만
         # 연산자 클래스가 기본과 달라 postgresql_ops를 명시해야 실물과 일치한다
         Index(
@@ -370,7 +371,12 @@ class Recording(TimestampMixin, Base):
     path: Mapped[str] = mapped_column(Text, unique=True)
     filename: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
+    # 크기와 앞뒤 1MB로 만든 싼 키. 청크 크기를 바꾸면 기존 값과 비교가 깨지므로
+    # 동일성의 정본은 아래 content_hash다
     partial_hash: Mapped[str] = mapped_column(Text)
+    # 파일 내용 전체의 sha256. 이름과 경로가 바뀌어도 같은 녹음을 다시 찾는 키이고,
+    # 파라미터가 없어 나중에 계산한 값과도 비교된다. 백필 전 행은 비어 있다
+    content_hash: Mapped[str | None] = mapped_column(Text)
     recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_sec: Mapped[float | None] = mapped_column(Double)
     language: Mapped[str | None] = mapped_column(Text)
