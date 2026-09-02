@@ -73,7 +73,7 @@ def test_scan_registers_and_detects_duplicates(db, tmp_path: Path, workspace):
     write_wav(tmp_path / "rec" / "note.txt", b"not audio")
 
     stats = scan(db, (tmp_path / "rec",), workspace_id=workspace.id)
-    assert stats == {"new": 2, "duplicate": 1, "reappeared": 0, "missing": 0}
+    assert stats == {"new": 2, "duplicate": 1, "reappeared": 0, "moved": 0, "missing": 0}
 
     rows = db.scalars(select(Recording).order_by(Recording.id)).all()
     assert len(rows) == 3
@@ -89,6 +89,7 @@ def test_scan_registers_and_detects_duplicates(db, tmp_path: Path, workspace):
         "new": 0,
         "duplicate": 0,
         "reappeared": 0,
+        "moved": 0,
         "missing": 0,
     }
 
@@ -182,8 +183,8 @@ def test_같은_파일이라도_워크스페이스가_다르면_중복이_아니
     mine = write_wav(tmp_path / "mine" / "a.wav", same)
     theirs = write_wav(tmp_path / "theirs" / "a.wav", same)
 
-    first = ingest_file(db, mine, workspace_id=workspace.id, source="upload")
-    second = ingest_file(db, theirs, workspace_id=other_workspace.id, source="upload")
+    first, _ = ingest_file(db, mine, workspace_id=workspace.id, source="upload")
+    second, _ = ingest_file(db, theirs, workspace_id=other_workspace.id, source="upload")
     db.commit()
 
     assert first.status == "pending"
