@@ -28,7 +28,7 @@ from soriham_api.quota import (
     transcription_block,
 )
 from soriham_api.ratelimit import sweep as sweep_attempts
-from soriham_api.stt_client import RunnerClient, RunnerUnavailable
+from soriham_api.stt_client import RunnerClient, RunnerJobTimedOut, RunnerUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,11 @@ CLAIM_TIERS = (CLAIMABLE, (ENRICH_WAITING,))
 # 워크스페이스가 후보에 못 들어와 그 안의 일감이 영원히 안 돈다
 CLAIMABLE_STATUSES = tuple(s for tier in CLAIM_TIERS for s in tier)
 IN_FLIGHT = ("transcribing", "diarizing", "summarizing")
+# 잡 하나에 허용하는 벽시계 시간. 러너가 running을 계속 주면 폴링은 영원히 돌고,
+# 폴링마다 찍는 하트비트 때문에 아래 정지 회수도 안 걸린다. 배속 실측 전이라 넉넉하게
+# 잡는다 — 실시간의 절반 배속으로 도는 CPU 러너도 재전사까지 이 안에 끝낸다
+JOB_TIMEOUT_RATIO = 20.0
+JOB_TIMEOUT_FLOOR_SEC = 3600.0
 # 이 시간보다 오래 아무 기록이 없으면 죽은 워커가 남긴 것으로 본다. 화자분리처럼
 # 진행률을 못 내는 단계가 있어 하트비트를 따로 찍는다
 STALE_AFTER = timedelta(minutes=5)
@@ -342,6 +347,11 @@ def _beat(session: Session, recording: Recording, now: datetime, last: datetime)
     return True
 
 
+def job_timeout_sec(recording: Recording) -> float:
+    """녹음 길이에 비례한 상한. 짧은 녹음도 모델 적재만으로 몇 분을 쓴다."""
+    return max(JOB_TIMEOUT_FLOOR_SEC, (recording.duration_sec or 0.0) * JOB_TIMEOUT_RATIO)
+
+
 def transcribe_stage(
     session: Session,
     recording: Recording,
@@ -393,6 +403,7 @@ def transcribe_stage(
             language=language,
             diarize=True,
             on_progress=report,
+            timeout_sec=job_timeout_sec(recording),
         )
         # 결과 파싱·저장 실패도 같은 에러 경로로 — transcribing 상태로 방치되지 않게
         session.execute(delete(Segment).where(Segment.recording_id == recording.id))
@@ -427,6 +438,17 @@ def transcribe_stage(
         session.commit()
         logger.warning("러너에 닿지 못함, 큐에 되돌림: %s (%s)", recording.filename, exc)
         raise
+    except RunnerJobTimedOut as exc:
+        session.rollback()
+        recording.status = "error"
+        recording.error = f"stt: {exc}"
+        recording.progress = None
+        recording.stage_started_at = None
+        _log_stage(session, recording, "transcribe", started, status="error", error=str(exc))
+        session.commit()
+        # 이 파일만의 문제로 보지 않는다. 물린 러너 앞에서 다음 녹음을 바로 집으면
+        # 대기열이 통째로 같은 상한을 태우며 error가 된다
+        raise RunnerUnavailable(str(exc)) from exc
     except Exception as exc:
         session.rollback()
         recording.status = "error"

@@ -49,6 +49,7 @@ class FakeRunnerClient:
         diarize,
         max_resubmits=2,
         on_progress=None,
+        timeout_sec=None,
     ):
         self.calls.append(audio_path)
         if on_progress is not None:
@@ -119,6 +120,31 @@ def test_process_one_isolates_error_and_continues(db, tmp_path: Path, workspace)
     # 다음 호출은 남은 레코드를 정상 처리
     assert process_one(db, FakeRunnerClient()) is True
     assert db.scalars(select(Recording).where(Recording.status == "done")).one() is not None
+
+
+def test_상한을_넘긴_잡은_에러로_세우고_러너에서_물러난다(db, tmp_path: Path, workspace):
+    """물린 러너 앞에서 다음 녹음을 바로 집으면 대기열이 통째로 상한을 태운다."""
+    from soriham_api.stt_client import RunnerJobTimedOut, RunnerUnavailable
+
+    register(db, tmp_path, ["a.wav"], workspace)
+    stuck = FakeRunnerClient(error=RunnerJobTimedOut("러너 잡이 제한 시간을 넘김: job-1"))
+
+    with pytest.raises(RunnerUnavailable):
+        process_one(db, stuck)
+
+    row = db.scalars(select(Recording)).one()
+    assert row.status == "error"
+    assert "제한 시간" in row.error
+
+
+def test_상한은_녹음_길이에_비례한다(db, tmp_path: Path, workspace):
+    from soriham_api.worker import JOB_TIMEOUT_FLOOR_SEC, job_timeout_sec
+
+    row = register(db, tmp_path, ["a.wav"], workspace)[0]
+    row.duration_sec = 10.0
+    assert job_timeout_sec(row) == JOB_TIMEOUT_FLOOR_SEC  # 짧은 녹음은 바닥값
+    row.duration_sec = 6 * 3600.0
+    assert job_timeout_sec(row) == 6 * 3600.0 * 20.0
 
 
 def test_recover_in_flight_uses_checkpoints(db, tmp_path: Path, workspace):
@@ -224,7 +250,15 @@ def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path,
 
     class StageRunner(FakeRunnerClient):
         def transcribe(
-            self, audio_path, *, model, language, diarize, max_resubmits=2, on_progress=None
+            self,
+            audio_path,
+            *,
+            model,
+            language,
+            diarize,
+            max_resubmits=2,
+            on_progress=None,
+            timeout_sec=None,
         ):
             self.calls.append(audio_path)
             on_progress("transcribe", 0.6)
