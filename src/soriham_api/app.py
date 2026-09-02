@@ -34,7 +34,8 @@ from soriham_api.db import make_session_factory
 from soriham_api.deps import CSRF_HEADER, WorkspaceContext, build_deps
 from soriham_api.ingest import (
     AUDIO_EXTENSIONS,
-    find_duplicate,
+    content_hash,
+    find_original,
     ingest_file,
     partial_hash,
     probe_duration,
@@ -204,7 +205,12 @@ def create_app(
                 except QuotaExceeded as exc:
                     raise HTTPException(413, str(exc)) from None
                 digest = partial_hash(staged, staged.stat().st_size)
-                original = find_duplicate(session, digest, workspace_id=workspace.id)
+                original = find_original(
+                    session,
+                    workspace_id=workspace.id,
+                    full=content_hash(staged),
+                    digest=digest,
+                )
                 if original is not None:
                     # 같은 내용이 이미 있으면 사본을 남기지 않고 기존 항목으로 돌려보낸다
                     raise HTTPException(
@@ -222,14 +228,15 @@ def create_app(
                     name,
                     taken=registered,
                 )
-                recording = ingest_file(
+                recording, outcome = ingest_file(
                     session,
                     dest,
                     workspace_id=workspace.id,
                     source="upload",
                     created_by_user_id=user.id,
                 )
-                if recording is None:  # registered()가 걸렀어야 하는 경우
+                if recording is None or outcome == "existing":
+                    # registered()가 걸렀어야 하는 경우
                     raise HTTPException(500, "업로드 경로를 정하지 못했습니다")
                 session.commit()
             except BaseException:

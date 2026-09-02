@@ -259,3 +259,31 @@ def test_스테이징_정리는_오래된_것만_지운다(tmp_path: Path):
 
     assert fresh.exists()
     assert not stale.exists()
+
+
+def test_원본_파일이_사라졌으면_업로드가_그_녹음을_되찾는다(
+    engine, db, tmp_path: Path, workspace, owner
+):
+    """사본을 다시 올리면 새 행이 아니라 잃었던 행이 그 파일을 가리킨다.
+
+    새 행을 만들면 녹취록과 요약은 파일 없는 행에 남고, 실물은 처음부터 다시 전사된다.
+    """
+    up = tmp_path / "uploads"
+    client = make_client(engine, up, owner=owner)
+
+    first = client.post(upload_path(workspace), files={"file": ("회의.wav", WAV, "audio/wav")})
+    assert first.status_code == 201
+    row = db.scalar(select(Recording))
+    row.status = "done"
+    row.summary = "요약"
+    db.commit()
+    Path(row.path).unlink()
+
+    resp = client.post(upload_path(workspace), files={"file": ("회의-사본.wav", WAV, "audio/wav")})
+
+    assert resp.status_code == 201
+    assert len(db.scalars(select(Recording)).all()) == 1
+    db.refresh(row)
+    assert row.filename.startswith("회의-사본")
+    assert row.status == "done"
+    assert row.summary == "요약"

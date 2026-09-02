@@ -55,10 +55,10 @@ class _Handler(FileSystemEventHandler):
             logger.warning("파일 크기가 안정되지 않아 건너뜀: %s", path)
             return
         with self._session_factory() as session:
-            created = ingest_file(session, path, workspace_id=self._workspace_id)
+            created, outcome = ingest_file(session, path, workspace_id=self._workspace_id)
             session.commit()
-        if created is not None:
-            logger.info("감시 등록: %s (%s)", path.name, created.status)
+        if created is not None and outcome != "existing":
+            logger.info("감시 등록: %s (%s, %s)", path.name, outcome, created.status)
 
 
 def watch(
