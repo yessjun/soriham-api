@@ -265,7 +265,7 @@ def test_원본이_그대로면_같은_내용은_중복이다(db, tmp_path: Path
     assert stats["new"] == 1 and stats["duplicate"] == 1 and stats["moved"] == 0
 
 
-def test_전체_해시는_가운데가_다른_파일을_가른다(tmp_path: Path):
+def test_전체_해시는_가운데가_다른_파일을_가른다(db, tmp_path: Path, workspace):
     """부분 해시는 앞뒤 1MB만 본다. 가운데가 깨진 복사본은 이쪽만 잡는다."""
     size = 3 * 1024 * 1024
     body = bytearray(b"x" * size)
@@ -275,6 +275,12 @@ def test_전체_해시는_가운데가_다른_파일을_가른다(tmp_path: Path
 
     assert partial_hash(a, size) == partial_hash(b, size)
     assert content_hash(a) != content_hash(b)
+    stats = scan(db, (tmp_path,), workspace_id=workspace.id)
+    assert stats["new"] == 2 and stats["duplicate"] == 0
+    rows = db.scalars(select(Recording).order_by(Recording.id)).all()
+    assert len(rows) == 2
+    assert all(row.status == "pending" for row in rows)
+    assert rows[0].content_hash != rows[1].content_hash
 
 
 def test_백필이_빈_해시를_채운다(db, tmp_path: Path, workspace):
