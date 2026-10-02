@@ -322,13 +322,20 @@ def create_app(
                 workspace_public_id=workspace.public_id,
                 upload_dir=cfg.upload_dir,
                 audio_dirs=cfg.audio_dirs,
+                path_current=recording.path_current,
             )
         except AudioUnavailable:
             # 뿌리 밖이든 파일이 없든 같은 답이다. 구분하면 어떤 경로가 있는지 알려준다
             raise HTTPException(
                 404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)"
             ) from None
-        return range_response(path, request.headers.get("range"))
+        return range_response(
+            path,
+            request.headers.get("range"),
+            expected_hash=recording.content_hash,
+            expected_signature=recording.file_signature,
+            verify_identity=True,
+        )
 
     @app.delete("/api/recordings/{public_id}", status_code=204)
     def delete_recording(
@@ -351,6 +358,7 @@ def create_app(
                     workspace_public_id=workspace.public_id,
                     upload_dir=cfg.upload_dir,
                     audio_dirs=cfg.audio_dirs,
+                    path_current=recording.path_current,
                 )
             except AudioUnavailable:
                 # 이미 없거나 뿌리 밖이면 행만 지운다. 뿌리 밖 경로를 여기서 지우면
@@ -384,7 +392,7 @@ def create_app(
         error에서 나가는 길이 삭제뿐이면 러너가 잠깐 죽은 사이 실패한 것을 손으로
         지우고 다시 올려야 한다. 세그먼트가 남아 있으면 전사를 건너뛴다.
         """
-        if recording.status != "error":
+        if recording.status != "error" or not recording.path_current:
             raise HTTPException(422, "실패한 녹음만 다시 시도할 수 있습니다")
         recording.status = resume_status(recording)
         recording.error = None

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import re
+import stat
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -14,9 +15,34 @@ from typing import Literal
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from soriham_api.files import content_hash, file_signature
 from soriham_api.models import Recording
 
 logger = logging.getLogger(__name__)
+SOURCE_CHANGED_PREFIX = "원본 변경: "
+
+
+class FileChangedDuringRead(RuntimeError):
+    """등록용 정보를 읽는 동안 파일이 바뀌어 다시 확인해야 한다."""
+
+
+def _ingest_lock(session: Session, key: str) -> None:
+    lock_id = int.from_bytes(hashlib.sha256(key.encode()).digest()[:8], "big", signed=True)
+    session.execute(select(func.pg_advisory_xact_lock(lock_id)))
+
+
+def _has_matching_file(recording: Recording) -> bool:
+    if not recording.path_current:
+        return False
+    path = Path(recording.path)
+    try:
+        before = file_signature(path)
+        if recording.file_signature == list(before):
+            return True
+        return content_hash(path) == recording.content_hash and file_signature(path) == before
+    except OSError:
+        return False
+
 
 AUDIO_EXTENSIONS = {
     ".wav",
@@ -33,7 +59,6 @@ AUDIO_EXTENSIONS = {
 }
 
 _PARTIAL_CHUNK = 1024 * 1024  # 앞뒤 1MB
-_HASH_CHUNK = 1024 * 1024  # 전체 해시 읽기 단위
 
 # 녹음기·녹음앱에서 흔한 파일명 날짜 패턴 (구체적인 것부터)
 _DATETIME_PATTERNS = [
@@ -55,20 +80,6 @@ def partial_hash(path: Path, size: int) -> str:
         if size > _PARTIAL_CHUNK:
             f.seek(-_PARTIAL_CHUNK, 2)
             h.update(f.read(_PARTIAL_CHUNK))
-    return h.hexdigest()
-
-
-def content_hash(path: Path) -> str:
-    """파일 내용 전체의 sha256.
-
-    부분 해시는 크기와 청크 크기(1MB)가 키에 들어가 있어 그 상수를 바꾸는 순간 예전
-    값과 비교가 깨진다. 개명·이동을 건너 같은 녹음을 다시 찾는 키로는 파라미터가 없는
-    쪽이 맞다. 가운데가 깨진 복사본도 이쪽만 잡는다.
-    """
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while chunk := f.read(_HASH_CHUNK):
-            h.update(chunk)
     return h.hexdigest()
 
 
@@ -119,6 +130,8 @@ def probe_duration(path: Path) -> float | None:
 
 def resume_status(recording: Recording) -> str:
     """체크포인트(저장된 산출물)로부터 재개 지점 상태를 유도한다."""
+    if recording.duplicate_of_id is not None:
+        return "duplicate"
     if recording.summary is not None:
         return "done"
     if recording.stt_meta is not None or recording.segments:
@@ -139,8 +152,11 @@ def find_by_content(session: Session, full: str, *, workspace_id: int) -> list[R
                 Recording.workspace_id == workspace_id,
                 Recording.content_hash == full,
                 Recording.status != "duplicate",
+                Recording.duplicate_of_id.is_(None),
             )
             .order_by(Recording.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     )
 
@@ -156,6 +172,7 @@ def find_duplicate(session: Session, digest: str, *, workspace_id: int) -> Recor
             Recording.workspace_id == workspace_id,
             Recording.partial_hash == digest,
             Recording.content_hash.is_(None),
+            Recording.path_current.is_(True),
             Recording.status.not_in(("duplicate", "missing")),
         )
         .order_by(Recording.id)
@@ -171,7 +188,7 @@ def find_original(
     넣으려 할 때 중복으로 막혀 복구할 방법이 없어진다.
     """
     for row in find_by_content(session, full, workspace_id=workspace_id):
-        if row.status != "missing" and Path(row.path).exists():
+        if row.status != "missing" and _has_matching_file(row):
             return row
     return find_duplicate(session, digest, workspace_id=workspace_id)
 
@@ -179,7 +196,7 @@ def find_original(
 def find_moved(session: Session, full: str, *, workspace_id: int) -> Recording | None:
     """같은 내용으로 등록됐는데 그 경로에 파일이 없는 행 — 개명·이동의 반대편이다."""
     for row in find_by_content(session, full, workspace_id=workspace_id):
-        if not Path(row.path).exists():
+        if not _has_matching_file(row):
             return row
     return None
 
@@ -195,6 +212,7 @@ def ingest_file(
     workspace_id: int,
     source: str = "scan",
     created_by_user_id: int | None = None,
+    verify_existing: bool = False,
 ) -> tuple[Recording | None, Outcome]:
     """파일 하나를 등록하고 무엇을 했는지 함께 돌려준다.
 
@@ -205,17 +223,61 @@ def ingest_file(
     반드시 말하게 한다. 기본값을 두면 빠뜨린 호출부가 조용히 엉뚱한 곳에 넣는다.
     """
     path = path.resolve()
-    existing = session.scalar(select(Recording).where(Recording.path == str(path)))
+    signature = file_signature(path)
+    query = select(Recording).where(Recording.path == str(path), Recording.path_current.is_(True))
+    existing = session.scalar(query)
     if existing is not None:
-        if existing.status == "missing":
-            existing.status = resume_status(existing)
-            logger.info("재등장: %s -> %s", path.name, existing.status)
-            return existing, "reappeared"
-        return existing, "existing"
+        if existing.workspace_id != workspace_id or existing.source != source:
+            raise ValueError("이 경로는 다른 워크스페이스 또는 유입 경로에 등록돼 있습니다")
+        if (
+            not verify_existing
+            and existing.content_hash is not None
+            and existing.file_signature == list(signature)
+            and existing.status != "missing"
+        ):
+            return existing, "existing"
 
-    size = path.stat().st_size
+    size = signature[2]
     digest = partial_hash(path, size)
     full = content_hash(path)
+    duration = probe_duration(path)
+    if file_signature(path) != signature:
+        raise FileChangedDuringRead("파일을 읽는 동안 내용이 변경됐습니다")
+
+    # 다른 이벤트와 스캔이 같은 내용·경로를 동시에 새 원본으로 등록하지 않는다
+    _ingest_lock(session, f"content:{workspace_id}:{full}")
+    _ingest_lock(session, f"path:{path}")
+    existing = session.scalar(query.with_for_update().execution_options(populate_existing=True))
+    if file_signature(path) != signature:
+        raise FileChangedDuringRead("등록 대기 중 파일이 변경됐습니다")
+    if existing is not None:
+        if existing.workspace_id != workspace_id or existing.source != source:
+            raise ValueError("이 경로는 다른 워크스페이스 또는 유입 경로에 등록돼 있습니다")
+        same = existing.content_hash == full or (
+            existing.content_hash is None and existing.partial_hash == digest
+        )
+        if same:
+            existing.file_signature = list(signature)
+            existing.content_hash = full
+            existing.size_bytes = size
+            existing.duration_sec = duration
+            if existing.status == "missing":
+                existing.status = resume_status(existing)
+                return existing, "reappeared"
+            if (existing.error or "").startswith(SOURCE_CHANGED_PREFIX):
+                existing.status = resume_status(existing)
+                existing.error = None
+            return existing, "existing"
+        if source != "scan":
+            raise ValueError("업로드 원본의 내용을 같은 경로에서 교체할 수 없습니다")
+        # 예전 공유가 새 파일을 가리키지 않도록 행과 산출물을 보존하며 경로만 놓는다
+        existing.path_current = False
+        existing.status = "missing"
+        existing.runner_request_id = None
+        existing.runner_started_at = None
+        existing.progress = None
+        existing.stage_started_at = None
+        session.flush()
 
     # 같은 내용의 행이 있는데 그 파일이 사라졌다면 중복이 아니라 이동이다. 새 행을
     # 만들면 녹취록은 사라진 행에 남고 실물에는 중복 표시가 붙어, 검색으로 찾아
@@ -227,6 +289,9 @@ def ingest_file(
         moved.filename = path.name
         moved.size_bytes = size
         moved.partial_hash = digest
+        moved.path_current = True
+        moved.file_signature = list(signature)
+        moved.duration_sec = duration
         # 새 이름에 날짜가 있으면 그것을 쓰고, 없으면 알던 값을 지킨다
         moved.recorded_at = parse_recorded_at(path.name) or moved.recorded_at
         moved.status = resume_status(moved)
@@ -242,8 +307,10 @@ def ingest_file(
         size_bytes=size,
         partial_hash=digest,
         content_hash=full,
+        path_current=True,
+        file_signature=list(signature),
         recorded_at=parse_recorded_at(path.name),
-        duration_sec=probe_duration(path),
+        duration_sec=duration,
         status="duplicate" if original is not None else "pending",
         duplicate_of_id=original.id if original is not None else None,
     )
@@ -259,7 +326,11 @@ def backfill_content_hashes(
     파일을 통째로 읽으므로 한 번에 다 돌리기 부담스러우면 `limit`으로 나눠 돌린다.
     파일이 없는 행은 건너뛴다 — 드라이브를 다시 붙이고 나서 채우면 된다.
     """
-    query = select(Recording).where(Recording.content_hash.is_(None)).order_by(Recording.id)
+    query = (
+        select(Recording)
+        .where(Recording.content_hash.is_(None), Recording.path_current.is_(True))
+        .order_by(Recording.id)
+    )
     if workspace_id is not None:
         query = query.where(Recording.workspace_id == workspace_id)
     remaining = session.scalar(select(func.count()).select_from(query.subquery()))
@@ -290,61 +361,97 @@ SWEEP_BLACKOUT_MIN = 20
 
 
 def scan(session: Session, dirs: tuple[Path, ...], *, workspace_id: int) -> dict[str, int]:
-    """폴더들을 스캔해 신규 등록·재등장·유실을 반영하고 집계를 돌려준다."""
+    """폴더별 읽기 성공과 장치 정보를 확인한 뒤 등록·유실을 반영한다."""
     stats = {"new": 0, "duplicate": 0, "reappeared": 0, "moved": 0, "missing": 0}
-
-    since_commit = 0
+    roots = sorted({base.resolve() for base in dirs})
     seen: set[str] = set()
-    for base in dirs:
-        if not base.is_dir():
-            logger.warning("스캔 폴더가 없습니다: %s", base)
-            continue
-        for path in sorted(base.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
+    complete: set[Path] = set()
+    identities: dict[Path, tuple[int, int]] = {}
+
+    def owner(path: str) -> Path | None:
+        matches = [base for base in roots if Path(path).is_relative_to(base)]
+        return max(matches, key=lambda base: len(base.parts)) if matches else None
+
+    def walk_error(error: OSError) -> None:
+        raise error
+
+    for base in roots:
+        try:
+            before = base.stat()
+            if not base.is_dir():
                 continue
-            seen.add(str(path.resolve()))
-            _, outcome = ingest_file(session, path, workspace_id=workspace_id)
-            if outcome != "existing":
-                stats[outcome] += 1
-            since_commit += 1
-            if since_commit >= SCAN_COMMIT_EVERY:
-                session.commit()
-                since_commit = 0
+            identities[base] = (before.st_dev, before.st_ino)
+            for directory, _, names in os.walk(base, onerror=walk_error):
+                for name in sorted(names):
+                    path = Path(directory) / name
+                    if path.suffix.lower() not in AUDIO_EXTENSIONS:
+                        continue
+                    resolved = path.resolve()
+                    if not resolved.is_relative_to(base) or str(resolved) in seen:
+                        continue
+                    if not stat.S_ISREG(path.stat().st_mode):
+                        continue
+                    seen.add(str(resolved))
+                    try:
+                        _, outcome = ingest_file(
+                            session, resolved, workspace_id=workspace_id, verify_existing=True
+                        )
+                        # 파일 단위로 확정해 다른 스캔과 내용 잠금을 서로 물고 기다리지 않는다
+                        session.commit()
+                        if outcome != "existing":
+                            stats[outcome] += 1
+                    except Exception:  # noqa: BLE001 - 파일 하나의 실패가 다른 등록을 끊지 않게 한다
+                        session.rollback()
+                        logger.exception("스캔 등록 실패: %s", path.name)
+            after = base.stat()
+            if identities[base] == (after.st_dev, after.st_ino):
+                complete.add(base)
+        except OSError:
+            logger.warning("스캔 폴더를 끝까지 읽지 못해 유실 판정을 보류: %s", base)
 
-    # 스캔 폴더 아래로 등록돼 있던 파일이 사라졌으면 missing 마킹 (삭제하지 않는다).
-    #
-    # 범위를 좁히는 두 조건이 없으면 스캔 한 번에 **다른 사람의 업로드가 전부** missing이
-    # 된다 — 그들의 파일은 이 폴더에 있을 이유가 없으므로 전부 "사라진 것"으로 보인다.
-    # source까지 보는 이유: 스캔 워크스페이스에 섞여 들어온 업로드본도 지켜야 한다.
-    #
-    prefixes = tuple(str(d.resolve()) + os.sep for d in dirs if d.is_dir())
-    # 판정에 필요한 것은 id와 경로뿐이다. 행 객체로 받으면 백로그 규모에서 수만 개가
-    # 통째로 세션에 올라온다
-    gone = [
-        row_id
-        for row_id, path in session.execute(
-            select(Recording.id, Recording.path).where(
-                Recording.status != "missing",
-                Recording.workspace_id == workspace_id,
-                Recording.source == "scan",
+    gone_by_root: dict[Path, list[int]] = {base: [] for base in roots}
+    stored = session.execute(
+        select(Recording.id, Recording.path, Recording.file_signature).where(
+            Recording.path_current.is_(True),
+            Recording.status != "missing",
+            Recording.workspace_id == workspace_id,
+            Recording.source == "scan",
+        )
+    )
+    for row_id, path, signature in stored:
+        owner_root = owner(path)
+        if owner_root not in complete or path in seen:
+            continue
+        assert owner_root is not None
+        if signature:
+            parent = Path(path).parent
+            device = None
+            while parent.is_relative_to(owner_root):
+                try:
+                    device = parent.stat().st_dev
+                    break
+                except FileNotFoundError:
+                    if parent == owner_root:
+                        break
+                    parent = parent.parent
+                except OSError:
+                    break
+            if device != signature[0]:
+                logger.warning("등록 때의 장치가 보이지 않아 유실 판정을 보류: %s", path)
+                continue
+        gone_by_root[owner_root].append(row_id)
+
+    for base, gone in gone_by_root.items():
+        has_seen = any(owner(path) == base for path in seen)
+        if not has_seen and len(gone) > SWEEP_BLACKOUT_MIN:
+            logger.warning("폴더에 오디오 없이 %d건이 사라져 유실 판정을 보류: %s", len(gone), base)
+            continue
+        for start in range(0, len(gone), SCAN_COMMIT_EVERY):
+            chunk = gone[start : start + SCAN_COMMIT_EVERY]
+            session.execute(
+                update(Recording).where(Recording.id.in_(chunk)).values(status="missing")
             )
-        )
-        if path.startswith(prefixes) and path not in seen
-    ]
-    # 이번 스캔에서 오디오를 하나도 못 봤는데 지워야 할 것이 무더기라면 폴더가 빈 것이
-    # 아니라 디스크가 없는 것이다. 마운트가 풀린 자리는 빈 폴더로 남아 is_dir()가
-    # 참이므로 이 구분을 다른 데서 할 수 없다. 사람이 손으로 지운 몇 건은 그대로 반영하고,
-    # 무더기만 막는다 — 문턱은 어림값이고, 넘겨 놓친 것은 다음 스캔이 잡는다
-    if not seen and len(gone) > SWEEP_BLACKOUT_MIN:
-        logger.warning(
-            "오디오를 하나도 못 봤는데 %d건이 사라진 것으로 보임 — 유실 판정을 건너뜀", len(gone)
-        )
-        gone = []
-    for start in range(0, len(gone), SCAN_COMMIT_EVERY):
-        chunk = gone[start : start + SCAN_COMMIT_EVERY]
-        session.execute(update(Recording).where(Recording.id.in_(chunk)).values(status="missing"))
-        stats["missing"] += len(chunk)
-        session.commit()
-
+            stats["missing"] += len(chunk)
+            session.commit()
     session.commit()
     return stats

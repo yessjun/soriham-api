@@ -20,7 +20,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from soriham_api.auth import sweep_sessions
-from soriham_api.ingest import resume_status
+from soriham_api.files import content_hash, file_signature
+from soriham_api.ingest import SOURCE_CHANGED_PREFIX, resume_status
 from soriham_api.models import JobLog, Recording, Segment, Workspace
 from soriham_api.quota import (
     DurationUnknown,
@@ -72,6 +73,25 @@ class Enricher(Protocol):
     ) -> None: ...
 
 
+class RecordingChanged(RuntimeError):
+    """처리 중 원본이 교체돼 이 요청의 결과를 사용할 수 없다."""
+
+
+def _lock_current_request(session: Session, recording_id: int, request_id: uuid.UUID) -> bool:
+    # 실패 이력의 별도 트랜잭션이 FK를 확인할 수 있도록 키 공유 잠금은 허용한다
+    row = session.scalar(
+        select(Recording)
+        .where(
+            Recording.id == recording_id,
+            Recording.path_current.is_(True),
+            Recording.runner_request_id == request_id,
+        )
+        .with_for_update(key_share=True)
+        .execution_options(populate_existing=True)
+    )
+    return row is not None
+
+
 def recover_in_flight(session: Session, *, now: datetime | None = None) -> int:
     """중단된 채 남은 레코드를 체크포인트 기준으로 되돌린다.
 
@@ -82,6 +102,7 @@ def recover_in_flight(session: Session, *, now: datetime | None = None) -> int:
     count = 0
     stale = select(Recording).where(
         Recording.status.in_(IN_FLIGHT),
+        Recording.path_current.is_(True),
         Recording.updated_at < now - STALE_AFTER,
     )
     for recording in session.scalars(stale):
@@ -105,7 +126,7 @@ def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
     # 재개 지점 판정은 resume_status와 같다. 파이썬으로 돌면 행마다 세그먼트를 통째로
     # 읽어 오는데, 러너가 몇 시간 죽어 있던 뒤라면 그 대상이 수천 건이다
     has_transcript = _has_transcript()
-    stmt = update(Recording).where(Recording.status == "error")
+    stmt = update(Recording).where(Recording.status == "error", Recording.path_current.is_(True))
     if workspace_id is not None:
         stmt = stmt.where(Recording.workspace_id == workspace_id)
     result = session.execute(
@@ -134,6 +155,7 @@ def requeue_unenriched(session: Session) -> int:
         update(Recording)
         .where(
             Recording.status == "done",
+            Recording.path_current.is_(True),
             Recording.summary.is_(None),
             _has_transcript(),
         )
@@ -187,7 +209,7 @@ def release_quota_blocked(session: Session) -> int:
     """
     rows = session.execute(
         select(Recording.id, Recording.workspace_id, Recording.duration_sec).where(
-            Recording.status == "quota_blocked"
+            Recording.status == "quota_blocked", Recording.path_current.is_(True)
         )
     ).all()
     if not rows:
@@ -281,7 +303,7 @@ def _workspaces_with_work(session: Session) -> list[int]:
     return list(
         session.scalars(
             select(Recording.workspace_id)
-            .where(Recording.status.in_(CLAIMABLE_STATUSES))
+            .where(Recording.status.in_(CLAIMABLE_STATUSES), Recording.path_current.is_(True))
             .distinct()
         ).all()
     )
@@ -295,6 +317,7 @@ def _claim_in_workspace(session: Session, workspace_id: int) -> Recording | None
             .where(
                 Recording.workspace_id == workspace_id,
                 Recording.status.in_(statuses),
+                Recording.path_current.is_(True),
             )
             .order_by(Recording.recorded_at.desc().nulls_last(), Recording.id.desc())
             .with_for_update(skip_locked=True)
@@ -380,6 +403,10 @@ def transcribe_stage(
     if recording.runner_request_id is None:
         recording.runner_request_id = uuid.uuid4()
         recording.runner_started_at = started
+    request_id = recording.runner_request_id
+    recording_id = recording.id
+    audio_path = Path(recording.path)
+    expected_hash = recording.content_hash
     recording.status = "transcribing"
     recording.stage_started_at = started
     recording.progress = None
@@ -415,21 +442,46 @@ def transcribe_stage(
         session.commit()
 
     try:
+        input_signature = None
+        if recording.source == "scan":
+            input_signature = file_signature(audio_path)
+            if (
+                expected_hash is None
+                or content_hash(audio_path) != expected_hash
+                or file_signature(audio_path) != input_signature
+            ):
+                raise RecordingChanged("등록한 원본과 현재 파일이 다릅니다. 스캔으로 재확인하세요")
         result = runner.transcribe(
-            Path(recording.path),
+            audio_path,
             model=model,
             language=language,
             diarize=True,
             on_progress=report,
             timeout_sec=job_timeout_sec(recording)
             - (started - (recording.runner_started_at or started)).total_seconds(),
-            request_id=str(recording.runner_request_id),
+            request_id=str(request_id),
         )
+        if input_signature is not None and (
+            file_signature(audio_path) != input_signature
+            or content_hash(audio_path) != expected_hash
+            or file_signature(audio_path) != input_signature
+        ):
+            raise RecordingChanged("전사 중 원본이 바뀌었습니다. 스캔으로 재확인하세요")
         # 추론 중에는 잠그지 않는다. 결과 저장부터는 삭제와 직렬화한다
-        present = session.scalar(
-            select(Recording.id).where(Recording.id == recording.id).with_for_update()
-        )
-        if present is None:
+        present = _lock_current_request(session, recording_id, request_id)
+        if not present:
+            exists_now = session.scalar(select(Recording.id).where(Recording.id == recording_id))
+            if exists_now is not None:
+                session.rollback()
+                _log_stage(
+                    session,
+                    recording,
+                    "transcribe",
+                    started,
+                    status="error",
+                    error="파일 교체로 이전 요청의 결과를 폐기했습니다",
+                )
+                raise RecordingChanged("파일 교체로 이전 요청의 결과를 폐기했습니다")
             _log_stage(
                 session, recording, "transcribe", started, status="done", meta=result.get("meta")
             )
@@ -457,10 +509,24 @@ def transcribe_stage(
         measured = max((seg["end"] for seg in result["segments"]), default=0.0)
         if measured > (recording.duration_sec or 0.0):
             recording.duration_sec = measured
+    except RecordingChanged as exc:
+        session.rollback()
+        if _lock_current_request(session, recording_id, request_id):
+            recording.status = "error"
+            recording.error = SOURCE_CHANGED_PREFIX + str(exc)
+            recording.runner_request_id = None
+            recording.runner_started_at = None
+            recording.progress = None
+            recording.stage_started_at = None
+            _log_stage(session, recording, "transcribe", started, status="error", error=str(exc))
+            session.commit()
+        raise
     except RunnerUnavailable as exc:
         # 러너에 못 닿은 것이지 이 파일의 문제가 아니다. error로 굳히면 러너가 죽어 있는
         # 동안 대기열 전체가 error가 되고, 되돌릴 길은 사람 손뿐이다
         session.rollback()
+        if not _lock_current_request(session, recording_id, request_id):
+            raise RecordingChanged("파일 교체 후의 이전 요청 실패입니다") from exc
         recording.status = "pending"
         recording.progress = None
         recording.stage_started_at = None
@@ -469,6 +535,8 @@ def transcribe_stage(
         raise
     except RunnerJobTimedOut as exc:
         session.rollback()
+        if not _lock_current_request(session, recording_id, request_id):
+            raise RecordingChanged("파일 교체 후의 이전 요청 시간 초과입니다") from exc
         recording.status = "error"
         recording.error = f"stt: {exc}"
         recording.progress = None
@@ -482,6 +550,8 @@ def transcribe_stage(
         raise RunnerUnavailable(str(exc)) from exc
     except Exception as exc:
         session.rollback()
+        if not _lock_current_request(session, recording_id, request_id):
+            raise RecordingChanged("파일 교체 후의 이전 요청 실패입니다") from exc
         recording.status = "error"
         recording.error = f"stt: {exc}"
         recording.progress = None
@@ -552,7 +622,8 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
         else:
             recording.error = carried
             _log_stage(session, recording, "enrich", started, status="done", atomic=True)
-    recording.status = "done"
+    current = session.scalar(select(Recording.path_current).where(Recording.id == recording.id))
+    recording.status = "done" if current else "missing"
     recording.progress = None
     recording.stage_started_at = None
     session.commit()

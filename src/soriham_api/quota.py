@@ -70,6 +70,7 @@ def measure(db: Session, workspace: Workspace, *, now: datetime | None = None) -
         select(func.coalesce(func.sum(Recording.size_bytes), 0)).where(
             Recording.workspace_id == workspace.id,
             Recording.status.not_in(STORED_STATUSES_EXCLUDED),
+            Recording.path_current.is_(True),
         )
     )
     return Usage(
