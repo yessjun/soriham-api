@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
-from sqlalchemy import case, delete, exists, select, update
+from sqlalchemy import JSON, and_, case, delete, exists, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,6 +25,7 @@ from soriham_api.models import JobLog, Recording, Segment, Workspace
 from soriham_api.quota import (
     DurationUnknown,
     QuotaExceeded,
+    Usage,
     check_minutes,
     measure,
     transcription_block,
@@ -101,7 +104,7 @@ def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
     """
     # 재개 지점 판정은 resume_status와 같다. 파이썬으로 돌면 행마다 세그먼트를 통째로
     # 읽어 오는데, 러너가 몇 시간 죽어 있던 뒤라면 그 대상이 수천 건이다
-    has_segments = exists().where(Segment.recording_id == Recording.id)
+    has_transcript = _has_transcript()
     stmt = update(Recording).where(Recording.status == "error")
     if workspace_id is not None:
         stmt = stmt.where(Recording.workspace_id == workspace_id)
@@ -109,7 +112,7 @@ def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
         stmt.values(
             status=case(
                 (Recording.summary.is_not(None), "done"),
-                (has_segments, ENRICH_WAITING),
+                (has_transcript, ENRICH_WAITING),
                 else_="pending",
             ),
             error=None,
@@ -118,13 +121,13 @@ def retry_failed(session: Session, *, workspace_id: int | None = None) -> int:
         )
     )
     session.commit()
-    return result.rowcount
+    return cast(CursorResult, result).rowcount
 
 
 def requeue_unenriched(session: Session) -> int:
     """요약 없이 done인 레코드를 엔리치먼트 대상으로 되돌린다(백필·재시도).
 
-    세그먼트가 있는지만 알면 되므로 SQL로 묻는다. 파이썬으로 돌면 행마다 세그먼트를
+    산출물이 있는지만 알면 되므로 SQL로 묻는다. 파이썬으로 돌면 행마다 세그먼트를
     통째로 읽어 오는데, 백필 대상은 백로그 전체일 수 있다.
     """
     result = session.execute(
@@ -132,12 +135,20 @@ def requeue_unenriched(session: Session) -> int:
         .where(
             Recording.status == "done",
             Recording.summary.is_(None),
-            exists().where(Segment.recording_id == Recording.id),
+            _has_transcript(),
         )
         .values(status=ENRICH_WAITING)
     )
     session.commit()
-    return result.rowcount
+    return cast(CursorResult, result).rowcount
+
+
+def _has_transcript():
+    # 무음처럼 세그먼트가 0개인 성공 결과도 체크포인트다
+    return or_(
+        and_(Recording.stt_meta.is_not(None), Recording.stt_meta != JSON.NULL),
+        exists().where(Segment.recording_id == Recording.id),
+    )
 
 
 def idle_maintenance(session_factory: sessionmaker[Session]) -> None:
@@ -182,7 +193,7 @@ def release_quota_blocked(session: Session) -> int:
     if not rows:
         return 0
 
-    usages: dict[int, object] = {}
+    usages: dict[int, Usage | None] = {}
     freed: list[int] = []
     for recording_id, workspace_id, duration_sec in rows:
         if workspace_id not in usages:
@@ -202,7 +213,7 @@ def release_quota_blocked(session: Session) -> int:
 
     # 재개 지점 판정은 resume_status와 같다. 일괄로 pending을 주면 이미 전사된 녹음이
     # 다시 전사돼 같은 오디오가 한도를 두 번 깎는다
-    has_segments = exists().where(Segment.recording_id == Recording.id)
+    has_transcript = _has_transcript()
     for start in range(0, len(freed), MAINTENANCE_CHUNK):
         session.execute(
             update(Recording)
@@ -210,7 +221,7 @@ def release_quota_blocked(session: Session) -> int:
             .values(
                 status=case(
                     (Recording.summary.is_not(None), "done"),
-                    (has_segments, ENRICH_WAITING),
+                    (has_transcript, ENRICH_WAITING),
                     else_="pending",
                 ),
                 progress=None,
@@ -303,11 +314,12 @@ def _log_stage(
     status: str,
     meta: dict | None = None,
     error: str | None = None,
+    atomic: bool = False,
 ) -> None:
-    """처리 이력을 남긴다. 호출자 트랜잭션이 아니라 별도 세션에서 커밋한다.
+    """성공 이력은 산출물과 함께, 실패·삭제된 녹음의 이력은 별도로 저장한다.
 
-    사용량 집계의 근거라 작업이 실패해도 남아야 한다. 같은 트랜잭션에 넣으면 전사 중에
-    녹음이 삭제될 때 롤백으로 이력까지 날아가고, 그러면 전사 시간 한도를 우회할 수 있다.
+    성공 이력만 먼저 커밋하면 재개할 때 두 번 청구한다. 실패 이력과 처리 중 삭제된
+    녹음의 사용량은 결과를 저장할 수 없더라도 남겨야 한다.
     """
     meta = meta or {}
     row = dict(
@@ -324,6 +336,9 @@ def _log_stage(
         model=meta.get("model"),
         error=error,
     )
+    if atomic:
+        session.add(JobLog(**row))
+        return
     with Session(bind=session.get_bind()) as ledger:
         try:
             ledger.add(JobLog(**row))
@@ -362,6 +377,9 @@ def transcribe_stage(
 ) -> None:
     """러너 호출 후 세그먼트를 저장한다(재실행 대비 기존 세그먼트 교체)."""
     started = datetime.now(UTC)
+    if recording.runner_request_id is None:
+        recording.runner_request_id = uuid.uuid4()
+        recording.runner_started_at = started
     recording.status = "transcribing"
     recording.stage_started_at = started
     recording.progress = None
@@ -403,8 +421,19 @@ def transcribe_stage(
             language=language,
             diarize=True,
             on_progress=report,
-            timeout_sec=job_timeout_sec(recording),
+            timeout_sec=job_timeout_sec(recording)
+            - (started - (recording.runner_started_at or started)).total_seconds(),
+            request_id=str(recording.runner_request_id),
         )
+        # 추론 중에는 잠그지 않는다. 결과 저장부터는 삭제와 직렬화한다
+        present = session.scalar(
+            select(Recording.id).where(Recording.id == recording.id).with_for_update()
+        )
+        if present is None:
+            _log_stage(
+                session, recording, "transcribe", started, status="done", meta=result.get("meta")
+            )
+            raise RuntimeError("전사 중 녹음이 삭제됐습니다")
         # 결과 파싱·저장 실패도 같은 에러 경로로 — transcribing 상태로 방치되지 않게
         session.execute(delete(Segment).where(Segment.recording_id == recording.id))
         for i, seg in enumerate(result["segments"]):
@@ -444,6 +473,8 @@ def transcribe_stage(
         recording.error = f"stt: {exc}"
         recording.progress = None
         recording.stage_started_at = None
+        recording.runner_request_id = None
+        recording.runner_started_at = None
         _log_stage(session, recording, "transcribe", started, status="error", error=str(exc))
         session.commit()
         # 이 파일만의 문제로 보지 않는다. 물린 러너 앞에서 다음 녹음을 바로 집으면
@@ -455,6 +486,8 @@ def transcribe_stage(
         recording.error = f"stt: {exc}"
         recording.progress = None
         recording.stage_started_at = None
+        recording.runner_request_id = None
+        recording.runner_started_at = None
         _log_stage(session, recording, "transcribe", started, status="error", error=str(exc))
         session.commit()
         raise
@@ -469,8 +502,16 @@ def transcribe_stage(
     recording.status = "summarizing"
     recording.progress = None
     recording.stage_started_at = datetime.now(UTC)
+    recording.runner_request_id = None
+    recording.runner_started_at = None
     _log_stage(
-        session, recording, "transcribe", started, status="done", meta=result.get("meta") or {}
+        session,
+        recording,
+        "transcribe",
+        started,
+        status="done",
+        meta=result.get("meta") or {},
+        atomic=True,
     )
     session.commit()
 
@@ -510,7 +551,7 @@ def enrich_stage(session: Session, recording: Recording, enricher: Enricher | No
             _log_stage(session, recording, "enrich", started, status="error", error=str(exc))
         else:
             recording.error = carried
-            _log_stage(session, recording, "enrich", started, status="done")
+            _log_stage(session, recording, "enrich", started, status="done", atomic=True)
     recording.status = "done"
     recording.progress = None
     recording.stage_started_at = None

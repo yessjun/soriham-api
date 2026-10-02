@@ -121,7 +121,7 @@ def resume_status(recording: Recording) -> str:
     """체크포인트(저장된 산출물)로부터 재개 지점 상태를 유도한다."""
     if recording.summary is not None:
         return "done"
-    if recording.segments:
+    if recording.stt_meta is not None or recording.segments:
         return "enriching"
     return "pending"
 
