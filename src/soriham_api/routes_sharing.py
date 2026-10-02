@@ -389,9 +389,17 @@ def register(app: FastAPI, deps: Deps) -> None:
                 workspace_public_id=workspace.public_id,
                 upload_dir=cfg.upload_dir,
                 audio_dirs=cfg.audio_dirs,
+                path_current=recording.path_current,
             )
         except AudioUnavailable:
             raise HTTPException(
                 404, "오디오 파일이 없습니다 (드라이브 오프라인일 수 있음)"
             ) from None
-        return range_response(path, request.headers.get("range"), headers=PUBLIC_HEADERS)
+        return range_response(
+            path,
+            request.headers.get("range"),
+            headers=PUBLIC_HEADERS,
+            expected_hash=recording.content_hash,
+            expected_signature=recording.file_signature,
+            verify_identity=True,
+        )

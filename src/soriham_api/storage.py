@@ -30,6 +30,7 @@ def resolve_audio_path(
     workspace_public_id: uuid.UUID,
     upload_dir: Path | None,
     audio_dirs: tuple[Path, ...],
+    path_current: bool = True,
 ) -> Path:
     """행에 적힌 경로가 허용된 뿌리 안인지 확인하고 실제 경로를 돌려준다.
 
@@ -39,6 +40,8 @@ def resolve_audio_path(
     심링크를 먼저 따라간다. 안 따라가면 허용된 뿌리 안에 링크 하나만 놓아도 밖이
     읽힌다.
     """
+    if not path_current:
+        raise AudioUnavailable("파일 내용이 교체된 경로입니다")
     real = Path(stored_path).resolve()
     if source == "upload":
         if upload_dir is None:

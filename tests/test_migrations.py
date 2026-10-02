@@ -55,6 +55,7 @@ def test_한국어_검색_인덱스가_trigram_gin이다(engine):
 
 # (인덱스 이름, WHERE 술어에 반드시 들어가야 하는 조각)
 PARTIAL_INDEX_PREDICATES = (
+    ("uq_recordings_current_path", "WHERE path_current"),
     ("uq_workspace_members_single_owner", "role = 'owner'"),
     ("uq_recording_shares_user", "user_id IS NOT NULL"),
     ("uq_recording_shares_email", "invite_email IS NOT NULL"),

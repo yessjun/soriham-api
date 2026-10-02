@@ -315,6 +315,9 @@ class AuthAttempt(Base):
 class Recording(TimestampMixin, Base):
     __tablename__ = "recordings"
     __table_args__ = (
+        Index(
+            "uq_recordings_current_path", "path", unique=True, postgresql_where=text("path_current")
+        ),
         CheckConstraint(
             _in_check("status", RECORDING_STATUSES),
             name="recordings_status_check",
@@ -366,9 +369,10 @@ class Recording(TimestampMixin, Base):
         BigInteger, ForeignKey("users.id", ondelete="SET NULL")
     )
     source: Mapped[str] = mapped_column(Text, default="upload", server_default="upload")
-    # 절대경로라 같은 경로는 같은 바이트다 — 전역 유일이 맞다. 업로드 경로가
-    # 워크스페이스로 갈려서 교차 충돌은 구조적으로 생기지 않는다
-    path: Mapped[str] = mapped_column(Text, unique=True)
+    # 교체 전 행은 경로·편집 정보를 보존하되 현재 파일을 내보내지 않는다
+    path: Mapped[str] = mapped_column(Text)
+    path_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    file_signature: Mapped[list[int] | None] = mapped_column(JSONB)
     filename: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     # 크기와 앞뒤 1MB로 만든 싼 키. 청크 크기를 바꾸면 기존 값과 비교가 깨지므로
