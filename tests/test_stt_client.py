@@ -111,6 +111,7 @@ def test_upload_mode_sends_file(tmp_path: Path):
     )
     client.transcribe(audio, model=None, language=None, diarize=True)
     assert b"pcm" in seen[0].read()
+    assert all(value is not None for value in seen[0].extensions["timeout"].values())
 
 
 def test_러너가_이_파일을_거절하면_큐로_되돌리지_않는다(tmp_path: Path):
@@ -148,13 +149,19 @@ def test_러너가_넘어진_것은_큐로_되돌린다(tmp_path: Path):
         client.submit(audio, model=None, language=None, diarize=False)
 
 
-def test_제한_시간을_넘긴_잡은_기다림을_끊는다(tmp_path: Path):
+def test_제한_시간을_넘긴_잡은_기다림을_끊는다(tmp_path: Path, monkeypatch):
     """러너가 running만 계속 주면 폴링은 끝나지 않고, 하트비트 때문에 정지 회수도
     안 걸린다. 상한이 없으면 그 뒤의 대기열이 통째로 조용히 멈춘다."""
+
+    from soriham_api import stt_client
+
+    clock = [0.0]
+    monkeypatch.setattr(stt_client.time, "monotonic", lambda: clock[0])
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/jobs" and request.method == "POST":
             return httpx.Response(200, json={"job_id": "job-1"})
+        clock[0] += 1
         return httpx.Response(200, json={"status": "running", "result": None, "error": None})
 
     client = RunnerClient(
@@ -177,4 +184,4 @@ def test_상한이_지났으면_재제출하지_않는다(tmp_path: Path):
         client.transcribe(
             tmp_path / "a.wav", model=None, language=None, diarize=True, timeout_sec=0.0
         )
-    assert fake.submits == 1
+    assert fake.submits == 0

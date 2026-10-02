@@ -50,6 +50,7 @@ class FakeRunnerClient:
         max_resubmits=2,
         on_progress=None,
         timeout_sec=None,
+        request_id=None,
     ):
         self.calls.append(audio_path)
         if on_progress is not None:
@@ -259,6 +260,7 @@ def test_화자분리로_넘어가면_진행률을_비운다(db, tmp_path: Path,
             max_resubmits=2,
             on_progress=None,
             timeout_sec=None,
+            request_id=None,
         ):
             self.calls.append(audio_path)
             on_progress("transcribe", 0.6)

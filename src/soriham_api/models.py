@@ -385,6 +385,9 @@ class Recording(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(Text, default="pending", server_default="pending")
     error: Mapped[str | None] = mapped_column(Text)
     stt_meta: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # 응답을 받기 전에 종료돼도 같은 요청을 다시 찾도록 제출 전에 저장한다
+    runner_request_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    runner_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 진행 중인 단계의 비율(0~1)과 그 단계 시작 시각. 남은 시간 계산에 쓴다
     progress: Mapped[float | None] = mapped_column(Double)
     stage_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

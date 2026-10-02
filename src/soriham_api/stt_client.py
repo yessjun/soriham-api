@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import httpx
 
@@ -76,15 +77,31 @@ class RunnerClient:
             return resp.json()
 
     def submit(
-        self, audio_path: Path, *, model: str | None, language: str | None, diarize: bool
+        self,
+        audio_path: Path,
+        *,
+        model: str | None,
+        language: str | None,
+        diarize: bool,
+        request_id: str | None = None,
+        timeout_sec: float | None = None,
     ) -> str:
         data: dict[str, Any] = {"diarize": "true" if diarize else "false"}
         if model:
             data["model"] = model
         if language:
             data["language"] = language
+        if request_id is not None:
+            data["request_id"] = request_id
+        if timeout_sec is not None:
+            data["timeout_sec"] = str(timeout_sec)
         try:
-            return self._submit(data, audio_path)
+            job_id = self._submit(data, audio_path, timeout_sec)
+            if request_id is not None and job_id != UUID(request_id).hex:
+                raise RunnerJobFailed(
+                    "러너가 요청 ID 재사용을 지원하지 않습니다. 러너를 갱신하세요"
+                )
+            return job_id
         except httpx.TransportError as exc:
             # 못 닿은 것과 이 파일이 문제인 것은 다르다. 섞으면 러너가 죽어 있는 동안
             # 대기열 전체가 error로 바뀐다
@@ -96,15 +113,16 @@ class RunnerClient:
             # 이걸 러너 장애로 다루면 큐로 되돌아가 같은 녹음을 영원히 다시 집는다
             raise RunnerJobFailed(_detail(exc)) from exc
 
-    def _submit(self, data: dict[str, Any], audio_path: Path) -> str:
+    def _submit(self, data: dict[str, Any], audio_path: Path, remaining: float | None) -> str:
+        timeout = self.timeout_sec if remaining is None else min(self.timeout_sec, remaining)
         with self._client() as client:
             if self.upload:
                 with audio_path.open("rb") as f:
                     resp = client.post(
-                        "/jobs", data=data, files={"file": (audio_path.name, f)}, timeout=None
+                        "/jobs", data=data, files={"file": (audio_path.name, f)}, timeout=timeout
                     )
             else:
-                resp = client.post("/jobs", data={**data, "path": str(audio_path)})
+                resp = client.post("/jobs", data={**data, "path": str(audio_path)}, timeout=timeout)
             resp.raise_for_status()
             return resp.json()["job_id"]
 
@@ -125,7 +143,10 @@ class RunnerClient:
                 if deadline is not None and time.monotonic() > deadline:
                     raise RunnerJobTimedOut(f"러너 잡이 제한 시간을 넘김: {job_id}")
                 try:
-                    resp = client.get(f"/jobs/{job_id}")
+                    timeout = self.timeout_sec
+                    if deadline is not None:
+                        timeout = min(timeout, max(0.001, deadline - time.monotonic()))
+                    resp = client.get(f"/jobs/{job_id}", timeout=timeout)
                     if resp.status_code == 404:
                         raise RunnerJobLost(job_id)
                     resp.raise_for_status()
@@ -165,6 +186,7 @@ class RunnerClient:
         max_resubmits: int = 2,
         on_progress: ProgressHook | None = None,
         timeout_sec: float | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """제출부터 완료까지. 러너 재시작으로 잡이 사라지면 재제출한다.
 
@@ -173,7 +195,17 @@ class RunnerClient:
         """
         deadline = None if timeout_sec is None else time.monotonic() + timeout_sec
         for attempt in range(max_resubmits + 1):
-            job_id = self.submit(audio_path, model=model, language=language, diarize=diarize)
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                raise RunnerJobTimedOut("러너 잡이 제한 시간을 넘김")
+            job_id = self.submit(
+                audio_path,
+                model=model,
+                language=language,
+                diarize=diarize,
+                request_id=request_id,
+                timeout_sec=remaining,
+            )
             try:
                 return self.wait(job_id, on_progress, deadline)
             except RunnerJobLost:
