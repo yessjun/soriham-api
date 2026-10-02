@@ -20,6 +20,7 @@ ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 def engine():
     """DATABASE_URL 기준으로 `<db>_test`를 만들어 마이그레이션으로 채우고 끝나면 지운다.
 
+    upgrade만 돌리면 깨진 downgrade를 놓친다.
     스키마를 `create_all`이 아니라 alembic으로 세우는 이유: 모델과 마이그레이션이
     갈라져도 `create_all` 경로에서는 영원히 드러나지 않는다. 테스트가 실제로 배포되는
     스키마를 쓰게 해야 그 차이가 테스트에서 터진다.
@@ -40,6 +41,8 @@ def engine():
     # 보간 문법 오류로 죽으므로 미리 이스케이프한다. env.py가 읽을 때 되돌아온다
     url_text = test_url.render_as_string(hide_password=False).replace("%", "%%")
     cfg.set_main_option("sqlalchemy.url", url_text)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
 
     test_engine = create_engine(test_url)
